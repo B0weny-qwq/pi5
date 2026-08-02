@@ -58,33 +58,33 @@ void simulateToTarget(VelocityModePositionController& controller,
 void testCascadedController()
 {
     AppConfig config;
-    config.pulsesPerRevolution = 3200;
+    config.pulsesPerRevolution = 6400;
     config.motorRpm = 6;
-    config.motorPositionKpRpmPerStep = 0.045;
+    config.motorPositionKpRpmPerStep = 0.0225;
     config.motorVelocityKpPerSecond = 8.0;
     config.motorMaximumAccelerationRpmS = 20.0;
     config.motorMaximumJerkRpmS3 = 300.0;
     config.motorBrakingAccelerationRpmS = 8.0;
-    config.motorPositionToleranceSteps = 1.5;
+    config.motorPositionToleranceSteps = 3.0;
     config.motorStopSpeedRpm = 1.0;
-    config.motorSoftLimitSteps = 130;
+    config.motorSoftLimitSteps = 260;
 
     VelocityModePositionController controller(config);
     double positionSteps = 0.0;
     double speedRpm = 0.0;
 
     simulateToTarget(
-        controller, config, 97, 2.0, positionSteps, speedRpm);
+        controller, config, 194, 2.0, positionSteps, speedRpm);
     std::fprintf(stderr, "forward position=%.3f speed=%.3f\n",
                  positionSteps, speedRpm);
-    assert(std::abs(positionSteps - 97.0) < 2.5);
+    assert(std::abs(positionSteps - 194.0) < 5.0);
     assert(std::abs(speedRpm) < 2.0);
 
     simulateToTarget(
-        controller, config, -60, 2.5, positionSteps, speedRpm);
+        controller, config, -120, 2.5, positionSteps, speedRpm);
     std::fprintf(stderr, "reverse position=%.3f speed=%.3f\n",
                  positionSteps, speedRpm);
-    assert(std::abs(positionSteps + 60.0) < 2.5);
+    assert(std::abs(positionSteps + 120.0) < 5.0);
     assert(std::abs(speedRpm) < 2.0);
 
     const MotorLoopTelemetry limited = controller.update(
@@ -95,16 +95,16 @@ void testCascadedController()
 void testSmallPipeAngleTarget()
 {
     AppConfig config;
-    config.pulsesPerRevolution = 3200;
+    config.pulsesPerRevolution = 6400;
     config.motorRpm = 6;
-    config.motorPositionKpRpmPerStep = 0.045;
+    config.motorPositionKpRpmPerStep = 0.0225;
     config.motorVelocityKpPerSecond = 8.0;
     config.motorMaximumAccelerationRpmS = 20.0;
     config.motorMaximumJerkRpmS3 = 300.0;
     config.motorBrakingAccelerationRpmS = 8.0;
-    config.motorPositionToleranceSteps = 1.5;
+    config.motorPositionToleranceSteps = 3.0;
     config.motorStopSpeedRpm = 1.0;
-    config.motorSoftLimitSteps = 130;
+    config.motorSoftLimitSteps = 260;
 
     VelocityModePositionController controller(config);
     double positionSteps = 0.0;
@@ -114,7 +114,7 @@ void testSmallPipeAngleTarget()
 
     for (int index = 0; index < 150; ++index) {
         const MotorLoopTelemetry state = controller.update(
-            17, positionSteps, speedRpm, dt);
+            34, positionSteps, speedRpm, dt);
         speedRpm = approach(
             speedRpm, state.commandSpeedRpm, 82.0 * dt);
         positionSteps += speedRpm / 60.0 *
@@ -126,16 +126,16 @@ void testSmallPipeAngleTarget()
     std::fprintf(stderr,
                  "small target position=%.3f peak=%.3f speed=%.3f\n",
                  positionSteps, maximumPositionSteps, speedRpm);
-    assert(std::abs(positionSteps - 17.0) <=
-           config.motorPositionToleranceSteps + 0.1);
-    assert(maximumPositionSteps < 22.0);
+    assert(std::abs(positionSteps - 34.0) <=
+            config.motorPositionToleranceSteps + 0.1);
+    assert(maximumPositionSteps < 44.0);
     assert(std::abs(speedRpm) < 1.0);
 }
 
 void testLowSpeedFeedbackAndQuantization()
 {
     AppConfig config;
-    config.pulsesPerRevolution = 3200;
+    config.pulsesPerRevolution = 6400;
     config.motorRpm = 6;
     config.motorEncoderSpeedFilterSeconds = 0.04;
 
@@ -174,16 +174,16 @@ void testLowSpeedFeedbackAndQuantization()
 void testSmallTargetWithIntegerZdtFeedback()
 {
     AppConfig config;
-    config.pulsesPerRevolution = 3200;
+    config.pulsesPerRevolution = 6400;
     config.motorRpm = 6;
-    config.motorPositionKpRpmPerStep = 0.045;
+    config.motorPositionKpRpmPerStep = 0.0225;
     config.motorVelocityKpPerSecond = 8.0;
     config.motorMaximumAccelerationRpmS = 20.0;
     config.motorMaximumJerkRpmS3 = 300.0;
     config.motorBrakingAccelerationRpmS = 8.0;
-    config.motorPositionToleranceSteps = 1.5;
+    config.motorPositionToleranceSteps = 3.0;
     config.motorStopSpeedRpm = 1.0;
-    config.motorSoftLimitSteps = 130;
+    config.motorSoftLimitSteps = 260;
     config.motorEncoderSpeedFilterSeconds = 0.04;
 
     VelocityModePositionController controller(config);
@@ -199,7 +199,7 @@ void testSmallTargetWithIntegerZdtFeedback()
         const double feedbackSpeedRpm = estimator.update(
             positionSteps, reportedSpeedRpm, dt);
         const MotorLoopTelemetry state = controller.update(
-            17, positionSteps, feedbackSpeedRpm, dt);
+            34, positionSteps, feedbackSpeedRpm, dt);
         const double wireSpeedRpm = quantizer.update(
             state.commandSpeedRpm);
         assert(std::abs(wireSpeedRpm) <= config.motorRpm);
@@ -216,8 +216,8 @@ void testSmallTargetWithIntegerZdtFeedback()
     std::fprintf(stderr,
                  "integer feedback target position=%.3f peak=%.3f speed=%.3f\n",
                  positionSteps, maximumPositionSteps, physicalSpeedRpm);
-    assert(std::abs(positionSteps - 17.0) < 3.0);
-    assert(maximumPositionSteps < 24.0);
+    assert(std::abs(positionSteps - 34.0) < 6.0);
+    assert(maximumPositionSteps < 48.0);
     assert(std::abs(physicalSpeedRpm) < 1.0);
 }
 

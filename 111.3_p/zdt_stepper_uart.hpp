@@ -215,7 +215,7 @@ class EmmV5Motor {
     uint8_t address_ = 1;
     uint16_t maximumRpm_ = 8;
     uint8_t acceleration_ = 5;
-    int pulsesPerRevolution_ = 3200;
+    int pulsesPerRevolution_ = 6400;
     int replyTimeoutMs_ = 15;
     bool expectCommandAck_ = true;
 
@@ -584,8 +584,10 @@ class MotorCommander {
     VelocityModePositionController controller_;
     EncoderSpeedEstimator speedEstimator_;
     VelocityCommandQuantizer velocityQuantizer_;
-    static constexpr int kFineTargetMagnitudeSteps = 40;
-    static constexpr double kFinePositionErrorSteps = 40.0;
+    // Fine positioning covers the same physical motor range at any microstep
+    // setting.  It was 40 steps at 3200 pulses/revolution.
+    static constexpr double kFinePositioningRevolutions = 40.0 / 3200.0;
+    int pulsesPerRevolution_ = 6400;
     int minimumIntervalMs_ = 33;
     int targetSteps_ = 0;
     int64_t lastCycleMs_ = 0;
@@ -600,12 +602,14 @@ class MotorCommander {
             minimumIntervalMs_ / 1000.0 :
             std::clamp((nowMs - lastCycleMs_) / 1000.0, 0.001, 0.10);
         // Fractional-RPM pulse density is only for the tiny O-5 holding angles.
-        // The O+5 travel target is about 52 steps and needs the original
-        // continuous velocity loop to overcome the push-pull mechanism load.
+        // The O+5 travel target is about 104 steps at 6400 microsteps and
+        // needs the continuous velocity loop to overcome linkage load.
+        const double finePositioningSteps =
+            kFinePositioningRevolutions * pulsesPerRevolution_;
         const bool finePositioning =
-            std::abs(targetSteps_) <= kFineTargetMagnitudeSteps &&
+            std::abs(targetSteps_) <= finePositioningSteps &&
             std::abs(static_cast<double>(targetSteps_) -
-                     state.positionSteps) <= kFinePositionErrorSteps;
+                     state.positionSteps) <= finePositioningSteps;
         double feedbackSpeedRpm = state.speedRpm;
         if (finePositioning) {
             feedbackSpeedRpm = speedEstimator_.update(
@@ -631,6 +635,7 @@ public:
         : motor_(motor),
           controller_(config),
           speedEstimator_(config),
+          pulsesPerRevolution_(config.pulsesPerRevolution),
           minimumIntervalMs_(std::max(
               1, 1000 / config.motorCommandHz)) {}
 

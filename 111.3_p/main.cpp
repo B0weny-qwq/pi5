@@ -186,8 +186,9 @@ ball_stepper::AppConfig makeUserConfig()
     // 【必须实测】水管固定铰链中心到连杆与水管连接点中心的距离。
     config.actuatorDistanceMm = 250.0;
 
-    // 【必须与ZDT细分设置一致】200整步×细分数：8细分1600，16细分3200。
-    config.pulsesPerRevolution = 3200;
+    // 【必须与ZDT细分设置一致】当前驱动器为200整步 x 32细分 = 6400。
+    // 与旧3200细分相比，同一真实水管角度需要两倍脉冲。
+    config.pulsesPerRevolution = 6400;
 
     // +1表示正脉冲应使axisRight端升高；实际相反时只改成-1。
     config.motorSign = 1;
@@ -234,8 +235,9 @@ ball_stepper::AppConfig makeUserConfig()
     // 每周期读取0x36位置和0x35速度，再发送一条0xF6；115200波特率下50 Hz有余量。
     config.motorCommandHz = 50;
 
-    // 轴位外环仍受25 RPM和制动速度上限约束，不会因目标脉冲翻倍而无限加速。
-    config.motorPositionKpRpmPerStep = 0.045;
+    // 脉冲数翻倍后，每脉冲物理角度减半，所以每脉冲位置增益减半；同一真实
+    // 水管角误差仍得到与旧3200细分相同的目标RPM。
+    config.motorPositionKpRpmPerStep = 0.0225;
 
     // 速度误差乘以本项得到期望加速度；ZDT内部仍使用自己的20 kHz速度闭环。
     config.motorVelocityKpPerSecond = 8.0;
@@ -247,13 +249,13 @@ ball_stepper::AppConfig makeUserConfig()
     // 制动速度公式使用45 RPM/s，低于最大65，补偿加速度经跃度限制后不能瞬间建立。
     config.motorBrakingAccelerationRpmS = 8.0;
 
-    // 约1.5脉冲且实测转速不高于1.5 RPM才认为目标轴位已稳定。
-    config.motorPositionToleranceSteps = 1.5;
+    // 与旧1.5脉冲保持相同物理容差，6400细分下使用3脉冲。
+    config.motorPositionToleranceSteps = 3.0;
     config.motorStopSpeedRpm = 1.0;
     config.motorEncoderSpeedFilterSeconds = 0.04;
 
-    // 0.91°按当前曲柄模型约136脉冲，软限位收回到±180并保留余量。
-    config.motorSoftLimitSteps = 180;
+    // 软限位也按细分翻倍：旧±180脉冲对应当前±360脉冲。
+    config.motorSoftLimitSteps = 360;
 
     // 驱动器菜单Response必须为Receive或Both，所有控制命令都核对02成功应答。
     // This driver is configured without control-command replies. Position and
