@@ -49,4 +49,4 @@ g++ -O3 -DNDEBUG "${common_flags[@]}" main.cpp \
     -o ball2_task3_velocity "${opencv_flags[@]}"
 
 echo "Build complete: ./ball2_task3_velocity"
-echo "  ZDT: 0xF6 velocity mode + 0x35 speed + 0x36 encoder position"
+echo "  ZDT: 0xF6 velocity mode + 0x35 speed + 0x30 pulse position"

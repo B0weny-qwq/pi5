@@ -42,10 +42,10 @@ MISS = 锁定后的连续漏检次数
 机构模型：目标水管角度 -> 目标电机轴位（脉冲）
 
 50 Hz电机串级环：
-0x36编码器实时位置 -> 位置误差 -> 目标RPM（含制动速度上限）
+0x30实时脉冲数 -> 位置误差 -> 目标RPM（含制动速度上限）
 0x35电机实时转速 -> 速度误差 -> 目标加速度
 目标加速度 -> 加速度限制 -> 跃度限制 -> 0xF6速度命令
-0xF6非零加速度档 -> ZDT内部20 kHz速度闭环
+0xF6速度斜率(RPM/s) -> ZDT内部20 kHz速度闭环
 ```
 
 这样既使用了速度模式，又不会失去目标角度保持能力。电机受负载、间隙或堵转影响
@@ -72,13 +72,14 @@ P_Serial    = UART_FUN
 Baud        = 115200
 ID_Addr     = 1
 Checksum    = 0x6B
-Response    = Receive 或 Both
+Response    = None
 S_Vel_IS    = Disable
 En          = Hold
 ```
 
-`Response` 必须能返回控制命令确认帧，否则程序会在启动时拒绝运行。`S_Vel_IS` 必须
-关闭；若开启，驱动器会把代码发送的 RPM 再缩小 10 倍。
+`Response` 必须为 `None`，因为程序以 50 Hz 连续发速度命令且不接收异步 ACK；读取
+`0x30` 与 `0x35` 仍会正常返回数据。`S_Vel_IS` 必须关闭；若开启，驱动器会把代码
+发送的 RPM 再缩小 10 倍。
 
 ## 当前电机环参数
 
@@ -86,23 +87,23 @@ En          = Hold
 
 ```cpp
 config.motorRpm = 6;                          // 速度模式最大RPM
-config.motorAcceleration = 12;                // ZDT硬件曲线加减速档，禁止为0
+config.motorSpeedSlopeRpmS = 30;               // 0xF6速度斜率，单位RPM/s
 config.motorCommandHz = 50;                   // 读位置、读速度、发速度的频率
-config.motorPositionKpRpmPerStep = 0.045;     // 位置误差 -> 目标RPM
+config.motorPositionKpRpmPerStep = 0.0225;    // 6400细分下：位置误差 -> 目标RPM
 config.motorVelocityKpPerSecond = 8.0;        // 速度误差 -> 目标加速度
 config.motorMaximumAccelerationRpmS = 20.0;   // 软件最大加速度
 config.motorMaximumJerkRpmS3 = 300.0;         // 软件最大跃度
 config.motorBrakingAccelerationRpmS = 8.0;    // 制动距离使用的保守等效减速度
-config.motorPositionToleranceSteps = 1.5;
-config.motorStopSpeedRpm = 1.5;
-config.motorSoftLimitSteps = 130;              // 相对水平零位的正负软限位
+config.motorPositionToleranceSteps = 3.0;
+config.motorStopSpeedRpm = 1.0;
+config.motorSoftLimitSteps = 360;              // 相对水平零位的正负软限位
 config.motorReplyTimeoutMs = 15;
 config.exitReturnTimeoutMs = 1800;
 ```
 
-手册给出的加速度公式为每增加 `1 RPM` 需要
-`(256 - acceleration) * 50 us`。档位 `12` 约等于 `82 RPM/s`，略高于软件限制的
-`20 RPM/s`，因此正常情况下由软件加速度环主导，ZDT 的曲线加减速再提供一层保护。
+`0xF6` 的第 4-5 字节是速度斜率（RPM/s），第 6-7 字节是目标速度（0.1 RPM）。
+`motorSpeedSlopeRpmS` 必须不低于软件最大加速度 `motorMaximumAccelerationRpmS`，
+否则驱动器会额外限速，软件制动模型会失真。
 
 ## 第3题钢球 PDI 控制
 
@@ -129,7 +130,7 @@ pipe_angle = clamp(Kp * error + Kd * v2_filtered + Ki * integral(error), +/- 0.3
 预览中的电机行：
 
 ```text
-M tgt=目标轴位  pos=编码器轴位  rpm=实测RPM  cmd=命令RPM  acc=命令加速度
+M tgt=目标轴位  pos=0x30实时脉冲数  rpm=0x35实测RPM  cmd=命令RPM  acc=命令加速度
 ```
 
 CSV 同时记录这些量。现场判断顺序：
@@ -152,7 +153,7 @@ CSV 同时记录这些量。现场判断顺序：
 ```text
 跟随太慢：先小幅增加 motorPositionKpRpmPerStep
 换向太慢：再小幅增加 motorMaximumAccelerationRpmS
-换向冲击：降低 motorMaximumJerkRpmS3 或 motorAcceleration
+换向冲击：降低 motorMaximumJerkRpmS3；不要把 motorSpeedSlopeRpmS 低于软件加速度上限
 目标附近来回抖：降低位置环增益，或稍增 motorPositionToleranceSteps
 编码器位置越界：立即停机，重新确认水平零位、motorSign和软限位
 ```

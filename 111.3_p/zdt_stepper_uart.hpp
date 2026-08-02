@@ -11,7 +11,7 @@
 //   -> 加速度/跃度限制 -> 0xF6速度模式
 //   -> ZDT内部20kHz速度闭环
 //
-// 0x35和0x36分别读取实时转速与实时位置。速度模式不再依靠软件积分猜位置，
+// 0x35和0x30分别读取实时转速与实时脉冲数。速度模式不再依靠软件积分猜位置，
 // 因而反向间隙、负载扰动和闭环步进的追赶动作都能反映到下一次控制计算中。
 // ============================================================================
 
@@ -37,27 +37,28 @@
 namespace ball_stepper {
 
 inline constexpr uint8_t ZDT_TAIL = 0x6B;
-inline constexpr double ZDT_POSITION_UNITS_PER_REVOLUTION = 65536.0;
+inline constexpr double ZDT_SPEED_UNITS_PER_RPM = 10.0;
 
-inline std::array<uint8_t, 8> makeZdtVelocityFrame(
+inline std::array<uint8_t, 9> makeZdtVelocityFrame(
     uint8_t address,
     double signedRpm,
     uint16_t maximumRpm,
-    uint8_t acceleration)
+    uint16_t speedSlopeRpmS)
 {
     const double limited = std::clamp(
         signedRpm,
         -static_cast<double>(maximumRpm),
          static_cast<double>(maximumRpm));
-    const uint16_t magnitude = static_cast<uint16_t>(std::lround(
-        std::abs(limited)));
+    const uint16_t magnitudeDeciRpm = static_cast<uint16_t>(std::lround(
+        std::abs(limited) * ZDT_SPEED_UNITS_PER_RPM));
     return {
         address,
         0xF6,
         limited >= 0.0 ? uint8_t{0x00} : uint8_t{0x01},
-        static_cast<uint8_t>((magnitude >> 8) & 0xFF),
-        static_cast<uint8_t>(magnitude & 0xFF),
-        acceleration,
+        static_cast<uint8_t>((speedSlopeRpmS >> 8) & 0xFF),
+        static_cast<uint8_t>(speedSlopeRpmS & 0xFF),
+        static_cast<uint8_t>((magnitudeDeciRpm >> 8) & 0xFF),
+        static_cast<uint8_t>(magnitudeDeciRpm & 0xFF),
         0x00,
         ZDT_TAIL
     };
@@ -214,8 +215,7 @@ class EmmV5Motor {
     SerialPort& serial_;
     uint8_t address_ = 1;
     uint16_t maximumRpm_ = 8;
-    uint8_t acceleration_ = 5;
-    int pulsesPerRevolution_ = 6400;
+    uint16_t speedSlopeRpmS_ = 60;
     int replyTimeoutMs_ = 15;
     bool expectCommandAck_ = true;
 
@@ -313,9 +313,8 @@ public:
               std::clamp(config.motorAddress, 0, 255))),
           maximumRpm_(static_cast<uint16_t>(
               std::clamp(config.motorRpm, 1, 3000))),
-          acceleration_(static_cast<uint8_t>(
-              std::clamp(config.motorAcceleration, 1, 255))),
-          pulsesPerRevolution_(config.pulsesPerRevolution),
+          speedSlopeRpmS_(static_cast<uint16_t>(
+              std::clamp(config.motorSpeedSlopeRpmS, 1, 65535))),
           replyTimeoutMs_(config.motorReplyTimeoutMs),
           expectCommandAck_(config.motorExpectCommandAck) {}
 
@@ -343,10 +342,21 @@ public:
         return sendControlCommand(frame, sizeof(frame), 0x0A);
     }
 
+    double quantizeVelocityRpm(double signedRpm) const
+    {
+        const double limited = std::clamp(
+            signedRpm,
+            -static_cast<double>(maximumRpm_),
+             static_cast<double>(maximumRpm_));
+        return std::round(limited * ZDT_SPEED_UNITS_PER_RPM) /
+            ZDT_SPEED_UNITS_PER_RPM;
+    }
+
     bool setVelocityRpm(double signedRpm)
     {
         const auto frame = makeZdtVelocityFrame(
-            address_, signedRpm, maximumRpm_, acceleration_);
+            address_, quantizeVelocityRpm(signedRpm), maximumRpm_,
+            speedSlopeRpmS_);
         return sendControlCommand(frame.data(), frame.size(), 0xF6);
     }
 
@@ -359,23 +369,21 @@ public:
             return false;
         }
         signedRpm = static_cast<double>(decodeSignedMagnitude(
-            response[2], response + 3, 2));
+            response[2], response + 3, 2)) / ZDT_SPEED_UNITS_PER_RPM;
         return true;
     }
 
     bool readRealtimePositionSteps(double& positionSteps)
     {
-        const uint8_t command[] = {address_, 0x36, ZDT_TAIL};
+        const uint8_t command[] = {address_, 0x30, ZDT_TAIL};
         uint8_t response[8]{};
-        if (!exchange(command, sizeof(command), 0x36,
+        if (!exchange(command, sizeof(command), 0x30,
                       response, sizeof(response), true)) {
             return false;
         }
-        const int64_t positionUnits = decodeSignedMagnitude(
+        const int64_t positionStepsRaw = decodeSignedMagnitude(
             response[2], response + 3, 4);
-        positionSteps = static_cast<double>(positionUnits) *
-            static_cast<double>(pulsesPerRevolution_) /
-            ZDT_POSITION_UNITS_PER_REVOLUTION;
+        positionSteps = static_cast<double>(positionStepsRaw);
         return true;
     }
 
@@ -433,10 +441,10 @@ public:
             (static_cast<double>(config_.pulsesPerRevolution) * boundedDt);
         previousPositionSteps_ = positionSteps;
 
-        // The 0x35 integer result is useful at 1 RPM and above. For fine
-        // positioning, its zero is quantization rather than proof of no motion.
+        // 0x35 has 0.1 RPM resolution. A reported zero can still mean a
+        // sub-0.05 RPM motion, so use the pulse-position estimate then.
         const double speedSampleRpm = std::clamp(
-            std::abs(reportedSpeedRpm) >= 0.5 ?
+            std::abs(reportedSpeedRpm) >= 0.05 ?
                 reportedSpeedRpm : encoderSpeedRpm,
             -static_cast<double>(config_.motorRpm),
              static_cast<double>(config_.motorRpm));
@@ -445,41 +453,6 @@ public:
         filteredSpeedRpm_ += alpha *
             (speedSampleRpm - filteredSpeedRpm_);
         return filteredSpeedRpm_;
-    }
-};
-
-class VelocityCommandQuantizer {
-    double fractionalRpm_ = 0.0;
-    int direction_ = 0;
-
-public:
-    void reset()
-    {
-        fractionalRpm_ = 0.0;
-        direction_ = 0;
-    }
-
-    double update(double requestedRpm)
-    {
-        if (std::abs(requestedRpm) < 1e-9) {
-            reset();
-            return 0.0;
-        }
-
-        const int direction = requestedRpm > 0.0 ? 1 : -1;
-        if (direction != direction_) {
-            fractionalRpm_ = 0.0;
-            direction_ = direction;
-        }
-
-        const double magnitude = std::abs(requestedRpm);
-        double integerRpm = std::floor(magnitude);
-        fractionalRpm_ += magnitude - integerRpm;
-        if (fractionalRpm_ >= 1.0) {
-            integerRpm += 1.0;
-            fractionalRpm_ -= 1.0;
-        }
-        return static_cast<double>(direction) * integerRpm;
     }
 };
 
@@ -583,11 +556,6 @@ class MotorCommander {
     EmmV5Motor& motor_;
     VelocityModePositionController controller_;
     EncoderSpeedEstimator speedEstimator_;
-    VelocityCommandQuantizer velocityQuantizer_;
-    // Fine positioning covers the same physical motor range at any microstep
-    // setting.  It was 40 steps at 3200 pulses/revolution.
-    static constexpr double kFinePositioningRevolutions = 40.0 / 3200.0;
-    int pulsesPerRevolution_ = 6400;
     int minimumIntervalMs_ = 33;
     int targetSteps_ = 0;
     int64_t lastCycleMs_ = 0;
@@ -601,28 +569,12 @@ class MotorCommander {
         const double dt = lastCycleMs_ == 0 ?
             minimumIntervalMs_ / 1000.0 :
             std::clamp((nowMs - lastCycleMs_) / 1000.0, 0.001, 0.10);
-        // Fractional-RPM pulse density is only for the tiny O-5 holding angles.
-        // The O+5 travel target is about 104 steps at 6400 microsteps and
-        // needs the continuous velocity loop to overcome linkage load.
-        const double finePositioningSteps =
-            kFinePositioningRevolutions * pulsesPerRevolution_;
-        const bool finePositioning =
-            std::abs(targetSteps_) <= finePositioningSteps &&
-            std::abs(static_cast<double>(targetSteps_) -
-                     state.positionSteps) <= finePositioningSteps;
-        double feedbackSpeedRpm = state.speedRpm;
-        if (finePositioning) {
-            feedbackSpeedRpm = speedEstimator_.update(
-                state.positionSteps, state.speedRpm, dt);
-        } else {
-            speedEstimator_.reset();
-            velocityQuantizer_.reset();
-        }
+        const double feedbackSpeedRpm = speedEstimator_.update(
+            state.positionSteps, state.speedRpm, dt);
         telemetry_ = controller_.update(
             targetSteps_, state.positionSteps, feedbackSpeedRpm, dt);
-        telemetry_.wireCommandSpeedRpm = finePositioning ?
-            velocityQuantizer_.update(telemetry_.commandSpeedRpm) :
-            std::round(telemetry_.commandSpeedRpm);
+        telemetry_.wireCommandSpeedRpm = motor_.quantizeVelocityRpm(
+            telemetry_.commandSpeedRpm);
         if (!motor_.setVelocityRpm(telemetry_.wireCommandSpeedRpm)) {
             return false;
         }
@@ -635,7 +587,6 @@ public:
         : motor_(motor),
           controller_(config),
           speedEstimator_(config),
-          pulsesPerRevolution_(config.pulsesPerRevolution),
           minimumIntervalMs_(std::max(
               1, 1000 / config.motorCommandHz)) {}
 

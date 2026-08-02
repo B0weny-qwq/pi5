@@ -228,11 +228,11 @@ ball_stepper::AppConfig makeUserConfig()
     // 位置外环还会按剩余距离自动降低目标RPM，不会一直满速冲向目标轴位。
     config.motorRpm = 6;
 
-    // ZDT 0xF6硬件曲线加减速档。手册规定0会关闭曲线加减速，本项目禁止为0。
-    // 档位12约对应82 RPM/s，略高于下面的软件最大加速度65 RPM/s。
-    config.motorAcceleration = 12;
+    // ZDT 0xF6 speed slope is an explicit RPM/s value. Keep it above the
+    // software acceleration limit so the software trajectory remains active.
+    config.motorSpeedSlopeRpmS = 30;
 
-    // 每周期读取0x36位置和0x35速度，再发送一条0xF6；115200波特率下50 Hz有余量。
+    // Each cycle reads 0x30 pulse position and 0x35 speed, then sends 0xF6.
     config.motorCommandHz = 50;
 
     // 脉冲数翻倍后，每脉冲物理角度减半，所以每脉冲位置增益减半；同一真实
@@ -257,9 +257,8 @@ ball_stepper::AppConfig makeUserConfig()
     // 软限位也按细分翻倍：旧±180脉冲对应当前±360脉冲。
     config.motorSoftLimitSteps = 360;
 
-    // 驱动器菜单Response必须为Receive或Both，所有控制命令都核对02成功应答。
-    // This driver is configured without control-command replies. Position and
-    // speed queries still require valid 0x36/0x35 responses every motor cycle.
+    // Driver Response must be None. Read commands still return 0x30/0x35
+    // data, while suppressing asynchronous 0xF6 ACK frames at 50 Hz.
     config.motorExpectCommandAck = false;
     config.motorReplyTimeoutMs = 15;
 

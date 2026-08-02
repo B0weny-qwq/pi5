@@ -117,10 +117,10 @@ struct AppConfig {
     std::string serialPort = "/dev/serial0";
     int serialBaud = 115200;
     int motorAddress = 1;
-    // 速度模式下的最大转速和ZDT内部曲线加减速档位。加速度档位必须非0，
-    // 否则驱动器会跳过曲线加减速，推拉机构换向时冲击很大。
+    // 0xF6 uses a 16-bit speed slope in RPM/s, not an acceleration slot.
+    // Keep it at or above the software acceleration limit.
     int motorRpm = 8;
-    int motorAcceleration = 5;
+    int motorSpeedSlopeRpmS = 60;
     int motorCommandHz = 30;
 
     // 电机串级环：目标水管角度先换算为目标电机轴位，位置环输出目标RPM，
@@ -133,7 +133,7 @@ struct AppConfig {
     double motorBrakingAccelerationRpmS = 40.0;
     double motorPositionToleranceSteps = 1.5;
     double motorStopSpeedRpm = 1.5;
-    // 0x35 reports integer RPM.  Below 1 RPM, use high-resolution 0x36
+    // 0x35 reports speed in 0.1 RPM units. Below 0.1 RPM, use 0x30 pulse
     // position changes to estimate a filtered motor speed for the inner loop.
     double motorEncoderSpeedFilterSeconds = 0.04;
 
@@ -342,7 +342,8 @@ inline bool validateConfig(const AppConfig& config)
     }
     if (config.motorAddress < 0 || config.motorAddress > 255 ||
         config.motorRpm < 1 || config.motorRpm > 3000 ||
-        config.motorAcceleration < 1 || config.motorAcceleration > 255 ||
+        config.motorSpeedSlopeRpmS < 1 ||
+        config.motorSpeedSlopeRpmS > 65535 ||
         config.motorCommandHz < 1 || config.motorCommandHz > 120 ||
         !std::isfinite(config.motorPositionKpRpmPerStep) ||
         config.motorPositionKpRpmPerStep <= 0.0 ||
@@ -370,14 +371,10 @@ inline bool validateConfig(const AppConfig& config)
         return false;
     }
 
-    // 手册公式：每增加1 RPM需要(256-acc)*50 us。软件制动模型不能假设
-    // 比驱动器硬件曲线更大的加速度，否则会低估停车距离。
-    const double zdtHardwareAccelerationRpmS =
-        20000.0 / (256.0 - config.motorAcceleration);
     if (config.motorMaximumAccelerationRpmS >
-        zdtHardwareAccelerationRpmS) {
+        static_cast<double>(config.motorSpeedSlopeRpmS)) {
         std::fprintf(stderr,
-            "software motor acceleration exceeds ZDT acceleration slot\n");
+            "software acceleration exceeds ZDT 0xF6 speed slope\n");
         return false;
     }
 

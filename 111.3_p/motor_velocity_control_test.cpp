@@ -10,17 +10,21 @@ namespace {
 
 void testVelocityFrame()
 {
-    const auto frame = makeZdtVelocityFrame(0x01, -1500.0, 3000, 0x0A);
-    const std::array<uint8_t, 8> expected = {
-        0x01, 0xF6, 0x01, 0x05, 0xDC, 0x0A, 0x00, 0x6B
+    const auto frame = makeZdtVelocityFrame(0x01, -1500.0, 3000, 1000);
+    const std::array<uint8_t, 9> expected = {
+        0x01, 0xF6, 0x01, 0x03, 0xE8, 0x3A, 0x98, 0x00, 0x6B
     };
     assert(frame == expected);
 
     const auto limited = makeZdtVelocityFrame(0x02, 4000.0, 25, 12);
     assert(limited[0] == 0x02);
     assert(limited[2] == 0x00);
-    assert(limited[3] == 0x00 && limited[4] == 0x19);
-    assert(limited[5] == 12 && limited[7] == 0x6B);
+    assert(limited[3] == 0x00 && limited[4] == 0x0C);
+    assert(limited[5] == 0x00 && limited[6] == 0xFA);
+    assert(limited[7] == 0x00 && limited[8] == 0x6B);
+
+    const auto precise = makeZdtVelocityFrame(0x01, 0.4, 6, 30);
+    assert(precise[5] == 0x00 && precise[6] == 0x04);
 }
 
 void simulateToTarget(VelocityModePositionController& controller,
@@ -132,7 +136,7 @@ void testSmallPipeAngleTarget()
     assert(std::abs(speedRpm) < 1.0);
 }
 
-void testLowSpeedFeedbackAndQuantization()
+void testLowSpeedFeedbackAndDeciRpmProtocol()
 {
     AppConfig config;
     config.pulsesPerRevolution = 6400;
@@ -152,26 +156,9 @@ void testLowSpeedFeedbackAndQuantization()
     }
     assert(std::abs(estimatedSpeedRpm - 1.0) < 0.02);
 
-    VelocityCommandQuantizer quantizer;
-    double transmittedRpmSum = 0.0;
-    for (int index = 0; index < 100; ++index) {
-        const double wireRpm = quantizer.update(0.40);
-        assert(wireRpm == 0.0 || wireRpm == 1.0);
-        transmittedRpmSum += wireRpm;
-    }
-    assert(std::abs(transmittedRpmSum - 40.0) <= 1.0);
-
-    quantizer.reset();
-    transmittedRpmSum = 0.0;
-    for (int index = 0; index < 100; ++index) {
-        const double wireRpm = quantizer.update(-0.40);
-        assert(wireRpm == 0.0 || wireRpm == -1.0);
-        transmittedRpmSum += wireRpm;
-    }
-    assert(std::abs(transmittedRpmSum + 40.0) <= 1.0);
 }
 
-void testSmallTargetWithIntegerZdtFeedback()
+void testSmallTargetWithDeciRpmZdtFeedback()
 {
     AppConfig config;
     config.pulsesPerRevolution = 6400;
@@ -188,7 +175,6 @@ void testSmallTargetWithIntegerZdtFeedback()
 
     VelocityModePositionController controller(config);
     EncoderSpeedEstimator estimator(config);
-    VelocityCommandQuantizer quantizer;
     constexpr double dt = 0.02;
     double positionSteps = 0.0;
     double physicalSpeedRpm = 0.0;
@@ -200,21 +186,24 @@ void testSmallTargetWithIntegerZdtFeedback()
             positionSteps, reportedSpeedRpm, dt);
         const MotorLoopTelemetry state = controller.update(
             34, positionSteps, feedbackSpeedRpm, dt);
-        const double wireSpeedRpm = quantizer.update(
-            state.commandSpeedRpm);
+        const double wireSpeedRpm = std::round(
+            state.commandSpeedRpm * ZDT_SPEED_UNITS_PER_RPM) /
+            ZDT_SPEED_UNITS_PER_RPM;
         assert(std::abs(wireSpeedRpm) <= config.motorRpm);
 
         physicalSpeedRpm = approach(
             physicalSpeedRpm, wireSpeedRpm, 82.0 * dt);
         positionSteps += physicalSpeedRpm / 60.0 *
             config.pulsesPerRevolution * dt;
-        reportedSpeedRpm = std::round(physicalSpeedRpm);
+        reportedSpeedRpm = std::round(
+            physicalSpeedRpm * ZDT_SPEED_UNITS_PER_RPM) /
+            ZDT_SPEED_UNITS_PER_RPM;
         maximumPositionSteps = std::max(
             maximumPositionSteps, positionSteps);
     }
 
     std::fprintf(stderr,
-                 "integer feedback target position=%.3f peak=%.3f speed=%.3f\n",
+                 "deci-RPM feedback target position=%.3f peak=%.3f speed=%.3f\n",
                  positionSteps, maximumPositionSteps, physicalSpeedRpm);
     assert(std::abs(positionSteps - 34.0) < 6.0);
     assert(maximumPositionSteps < 48.0);
@@ -228,8 +217,8 @@ int main()
     testVelocityFrame();
     testCascadedController();
     testSmallPipeAngleTarget();
-    testLowSpeedFeedbackAndQuantization();
-    testSmallTargetWithIntegerZdtFeedback();
+    testLowSpeedFeedbackAndDeciRpmProtocol();
+    testSmallTargetWithDeciRpmZdtFeedback();
     std::puts("motor velocity controller tests passed");
     return 0;
 }
