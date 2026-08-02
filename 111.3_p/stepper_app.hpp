@@ -22,12 +22,17 @@
 #include "zdt_stepper_uart.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cstdarg>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 
@@ -58,9 +63,81 @@ inline std::string cameraFourccText(double rawFourcc)
     return std::string(text);
 }
 
+struct RuntimeLogPaths {
+    std::string textPath;
+    std::string csvPath;
+};
+
+inline std::string runtimeLogToken(const std::string& value)
+{
+    std::string token;
+    token.reserve(value.size());
+    for (const unsigned char character : value) {
+        if (std::isalnum(character) || character == '_' ||
+            character == '-') {
+            token.push_back(static_cast<char>(character));
+        } else {
+            token.push_back('_');
+        }
+    }
+    return token.empty() ? "run" : token;
+}
+
+inline RuntimeLogPaths makeRuntimeLogPaths(const AppConfig& config)
+{
+    namespace filesystem = std::filesystem;
+
+    const filesystem::path directory(config.runtimeLogDirectory);
+    std::error_code error;
+    filesystem::create_directories(directory, error);
+    if (error) return {};
+
+    const auto now = std::chrono::system_clock::now();
+    const auto milliseconds = std::chrono::duration_cast<
+        std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+    const std::time_t calendarTime =
+        std::chrono::system_clock::to_time_t(now);
+    std::tm localTime{};
+#if defined(_WIN32)
+    if (localtime_s(&localTime, &calendarTime) != 0) return {};
+#else
+    if (localtime_r(&calendarTime, &localTime) == nullptr) return {};
+#endif
+
+    char timestamp[40];
+    std::snprintf(
+        timestamp, sizeof(timestamp), "%04d%02d%02d_%02d%02d%02d_%03lld",
+        localTime.tm_year + 1900, localTime.tm_mon + 1, localTime.tm_mday,
+        localTime.tm_hour, localTime.tm_min, localTime.tm_sec,
+        static_cast<long long>(milliseconds));
+    const std::string stem = runtimeLogToken(config.runtimeLogEvent) +
+        "_" + timestamp;
+
+    for (int suffix = 0; suffix < 1000; ++suffix) {
+        const std::string suffixText = suffix == 0 ? "" :
+            "_" + std::to_string(suffix);
+        const filesystem::path textPath = directory /
+            (stem + suffixText + ".log");
+        const filesystem::path csvPath = directory /
+            (stem + suffixText + ".csv");
+        std::error_code existsError;
+        const bool textExists = filesystem::exists(textPath, existsError);
+        if (existsError) return {};
+        const bool csvExists = filesystem::exists(csvPath, existsError);
+        if (existsError) return {};
+        if (!textExists && !csvExists) {
+            return {textPath.string(), csvPath.string()};
+        }
+    }
+    return {};
+}
+
 class RuntimeDiagnosticLog {
     bool enabled_ = false;
-    std::FILE* file_ = nullptr;
+    std::FILE* textFile_ = nullptr;
+    std::FILE* csvFile_ = nullptr;
+    std::string textPath_;
+    std::string csvPath_;
     double startTime_ = 0.0;
 
 public:
@@ -69,17 +146,47 @@ public:
           startTime_(secondsNow())
     {
         if (!enabled_) return;
-        file_ = std::fopen(config.runtimeLogPath.c_str(), "w");
-        if (!file_) {
+        const RuntimeLogPaths paths = makeRuntimeLogPaths(config);
+        textPath_ = paths.textPath;
+        csvPath_ = paths.csvPath;
+        if (textPath_.empty() || csvPath_.empty()) {
+            std::fprintf(stderr,
+                "WARNING: cannot create runtime log directory %s\n",
+                config.runtimeLogDirectory.c_str());
+            return;
+        }
+
+        textFile_ = std::fopen(textPath_.c_str(), "w");
+        if (!textFile_) {
             std::fprintf(stderr, "WARNING: cannot open runtime log %s\n",
-                         config.runtimeLogPath.c_str());
+                         textPath_.c_str());
+        }
+        csvFile_ = std::fopen(csvPath_.c_str(), "w");
+        if (!csvFile_) {
+            std::fprintf(stderr, "WARNING: cannot open runtime CSV %s\n",
+                         csvPath_.c_str());
+        } else {
+            std::fputs(
+                "elapsed_s,armed,center_ready_frames,ball_measured,"
+                "ball_locked,confidence,pixel_x,pixel_y,position_cm,"
+                "target_cm,error_cm,speed_cm_s,two_frame_speed_cm_s,"
+                "requested_angle_deg,applied_angle_deg,motor_target_steps,"
+                "motor_actual_steps,motor_target_rpm,motor_actual_rpm,"
+                "motor_command_rpm,motor_wire_rpm,"
+                "motor_acceleration_rpm_s\n",
+                csvFile_);
+            std::fflush(csvFile_);
         }
     }
 
     ~RuntimeDiagnosticLog()
     {
-        if (file_) std::fclose(file_);
+        if (textFile_) std::fclose(textFile_);
+        if (csvFile_) std::fclose(csvFile_);
     }
+
+    const std::string& textPath() const { return textPath_; }
+    const std::string& csvPath() const { return csvPath_; }
 
     void write(const char* format, ...)
     {
@@ -96,10 +203,45 @@ public:
                       secondsNow() - startTime_, message);
         std::fputs(line, stderr);
         std::fflush(stderr);
-        if (file_) {
-            std::fputs(line, file_);
-            std::fflush(file_);
+        if (textFile_) {
+            std::fputs(line, textFile_);
+            std::fflush(textFile_);
         }
+    }
+
+    void writeControlSample(
+        bool armed,
+        int centerReadyFrames,
+        bool ballMeasured,
+        bool ballLocked,
+        double confidence,
+        double pixelX,
+        double pixelY,
+        double positionCm,
+        double targetCm,
+        double errorCm,
+        double speedCmS,
+        double rawTwoFrameSpeedCmS,
+        double requestedAngleDeg,
+        double appliedAngleDeg,
+        int motorTargetSteps,
+        const MotorLoopTelemetry& motorTelemetry)
+    {
+        if (!enabled_ || !csvFile_) return;
+        std::fprintf(
+            csvFile_,
+            "%.6f,%d,%d,%d,%d,%.5f,%.3f,%.3f,%.5f,%.5f,%+.5f,%+.5f,"
+            "%+.5f,%+.6f,%+.6f,%d,%+.3f,%+.3f,%+.3f,%+.3f,%+.3f,%+.3f\n",
+            secondsNow() - startTime_, armed ? 1 : 0, centerReadyFrames,
+            ballMeasured ? 1 : 0, ballLocked ? 1 : 0, confidence, pixelX,
+            pixelY, positionCm, targetCm, errorCm, speedCmS,
+            rawTwoFrameSpeedCmS, requestedAngleDeg, appliedAngleDeg,
+            motorTargetSteps, motorTelemetry.actualSteps,
+            motorTelemetry.targetSpeedRpm, motorTelemetry.actualSpeedRpm,
+            motorTelemetry.commandSpeedRpm,
+            motorTelemetry.wireCommandSpeedRpm,
+            motorTelemetry.commandAccelerationRpmS);
+        std::fflush(csvFile_);
     }
 };
 
@@ -108,6 +250,12 @@ inline int runTask3App(const AppConfig& config)
     if (!validateConfig(config)) return 1;
 
     RuntimeDiagnosticLog diagnostics(config);
+    diagnostics.write(
+        "RUN_LOG text=%s csv=%s",
+        diagnostics.textPath().empty() ? "<unavailable>" :
+            diagnostics.textPath().c_str(),
+        diagnostics.csvPath().empty() ? "<unavailable>" :
+            diagnostics.csvPath().c_str());
     diagnostics.write(
         "START motor=%d port=%s baud=%d address=%d ppr=%d cmd_hz=%d "
         "max_rpm=%d slope=%d armed_at_start=%d",
@@ -514,6 +662,14 @@ inline int runTask3App(const AppConfig& config)
                 motorTelemetry.commandSpeedRpm,
                 motorTelemetry.wireCommandSpeedRpm,
                 motorTelemetry.commandAccelerationRpmS);
+            diagnostics.writeControlSample(
+                armed, std::min(centerReadyFrames, 6), result.measured,
+                result.locked, result.confidence,
+                result.measured ? result.center.x : -1.0f,
+                result.measured ? result.center.y : -1.0f,
+                positionCm, targetCm, errorCm, speedCmS, rawTwoFrameSpeedCmS,
+                requestedAngleDeg, appliedAngleDeg, motorSteps,
+                motorTelemetry);
             nextRuntimeLogTime = now +
                 config.runtimeLogIntervalMs / 1000.0;
         }

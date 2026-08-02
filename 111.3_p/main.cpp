@@ -289,7 +289,8 @@ ball_stepper::AppConfig makeUserConfig()
     config.terminalKeys = true;
     config.csv = false;
     config.runtimeLogEnabled = true;
-    config.runtimeLogPath = "ball2_task3_runtime.log";
+    config.runtimeLogDirectory = "logs";
+    config.runtimeLogEvent = "task3_start";
     config.runtimeLogIntervalMs = 200;
 
     // 每个控制帧都提交最新预览。SSH/X11显示慢时只丢旧预览帧，

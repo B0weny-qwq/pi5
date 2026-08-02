@@ -164,7 +164,8 @@ struct AppConfig {
     bool terminalKeys = true;
     bool csv = false;
     bool runtimeLogEnabled = true;
-    std::string runtimeLogPath = "ball2_task3_runtime.log";
+    std::string runtimeLogDirectory = "logs";
+    std::string runtimeLogEvent = "task3_start";
     int runtimeLogIntervalMs = 200;
     int previewEveryNFrames = 2;
 
@@ -396,8 +397,8 @@ inline bool validateConfig(const AppConfig& config)
             "headless motor mode requires terminalKeys or startArmed=true\n");
         return false;
     }
-    if (config.runtimeLogEnabled && config.runtimeLogPath.empty()) {
-        std::fprintf(stderr, "runtime log path is empty\n");
+    if (config.runtimeLogEnabled && config.runtimeLogDirectory.empty()) {
+        std::fprintf(stderr, "runtime log directory is empty\n");
         return false;
     }
     if (config.runtimeLogIntervalMs < 50 ||
