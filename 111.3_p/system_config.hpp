@@ -62,7 +62,7 @@ struct AppConfig {
     cv::Point2f centerCalibrationPoint{};
     cv::Point2f plus5CalibrationPoint{};
 
-    // ---------------- 第3题自动流程 ----------------
+    // ---------------- 第3题目标流程 ----------------
     // 钢球从O出发，先到O+task3OffsetCm，再自动去O-task3OffsetCm。
     double task3OffsetCm = 5.0;
     // O-5终点的实机补偿量。正值表示控制目标略向左移，用于修正最终总停在
@@ -73,40 +73,6 @@ struct AppConfig {
     double task3PositiveToleranceCm = 0.35;
     int task3ArrivalConfirmFrames = 8;
 
-    // 纯P控制接近目标时角度会变得太小，可能克服不了机构静摩擦。
-    // 去O+5途中，距目标超过该误差时至少使用minimumTravelAngleDeg。
-    double task3MinimumTravelAngleDeg = 0.40;
-    // 折返到O-5时朝目标滚动使用的固定行程角。第3题要在5秒内走完10 cm
-    // 返回距离，不能再用只有几个脉冲的0.05度小角度。
-    double task3ReturnAngleLimitDeg = 0.55;
-    // 返程钢球速度环：低速时使用上面的完整驱动力，接近巡航速度后逐渐回平。
-    // 这样既能克服推拉机构静摩擦，又不会让钢球在10 cm返程中持续加速。
-    double task3ReturnCruiseSpeedCmS = 3.0;
-    double task3ReturnSpeedKpDegPerCmS = 0.05;
-    // 距O-5进入该范围后，允许小幅速度制动，不再强制等到越过目标才刹车。
-    double task3ReturnApproachZoneCm = 0.8;
-    // 能量制动阶段使用的反向倾角上限。
-    double task3ReturnBrakeAngleLimitDeg = 0.55;
-    // O-5附近小范围PD保持所用Kd；远距离返回不再让Kd提前撤掉行程角。
-    double task3ReturnKd = 0.0;
-
-    // 满行程倾角下钢球可获得的实测减速度，单位cm/s^2。控制器用
-    // v^2/(2a)计算何时反向倾斜刹车；值越小，开始刹车越早。
-    double task3BrakingAccelerationCmS2 = 7.0;
-    // 在理论制动距离上额外增加的安全余量，用于补偿速度滤波和电机响应延迟。
-    double task3BrakingMarginCm = 0.45;
-    // 无论速度公式算出多长的制动距离，离O-5超过此距离时都禁止满幅刹车。
-    // 这是实机防止“还没到O-5就被刹停”的硬限制。
-    double task3MaximumBrakeStartDistanceCm = 2.5;
-    // 已进入刹车后，只有重新明显离开制动条件才释放，避免逐帧正反抖动。
-    double task3BrakeReleaseHysteresisCm = 0.25;
-    // 进入目标附近后不再使用满幅往返，而切换到小角度PD/爬行控制。
-    double task3SettleZoneCm = 1.0;
-    double task3SettleAngleLimitDeg = 0.14;
-    double task3CreepAngleDeg = 0.06;
-    double task3CreepErrorCm = 0.22;
-    double task3CreepSpeedCmS = 2.0;
-
     // 到达-5 cm后，位置和速度同时满足条件并持续一段时间，才判定完成。
     // 右侧误差单独收紧，防止球尚未真正到达-5就被提前判定为完成；
     // 左侧仍保留较宽容差，用于吸收返程惯性和视觉测量抖动。
@@ -116,12 +82,23 @@ struct AppConfig {
     int task3FinalStableMs = 200;
     int task3TimeLimitMs = 5000;
 
-    // ---------------- 视觉外环PD ----------------
-    double kp = 0.08;                 // deg/cm
-    double kd = 0.0;                  // deg/(cm/s)
-    double speedFilterSeconds = 0.055;
-    double centerDeadbandCm = 0.15;
-    double stopSpeedCmS = 1.0;
+    // ---------------- 第3题钢球位置 PDI 外环 ----------------
+    // error = position - target.  Kd directly multiplies the signed velocity
+    // estimated from the current detection and the detection two frames ago.
+    double task3PositionKpDegPerCm = 0.070;
+    double task3VelocityKdDegPerCmS = 0.020;
+    // I is active only near the final -5 cm target.  Its output is capped by
+    // task3IntegralLimitCmSeconds * task3IntegralKiDegPerCmSecond.
+    double task3IntegralKiDegPerCmSecond = 0.120;
+    double task3IntegralZoneCm = 0.50;
+    double task3IntegralSpeedLimitCmS = 1.0;
+    double task3IntegralLimitCmSeconds = 0.75;
+
+    // This is a limiter, not a commanded travel angle.  0.35 deg matches the
+    // previous verified O -> O+5 peak amplitude while P and D set every value.
+    double task3OutputAngleLimitDeg = 0.35;
+    double speedFilterSeconds = 0.020;
+    int speedDifferenceFrames = 2;
     double maximumPipeAngleDeg = 1.0;
     double angleSlewDegS = 10.0;
 
@@ -156,6 +133,9 @@ struct AppConfig {
     double motorBrakingAccelerationRpmS = 40.0;
     double motorPositionToleranceSteps = 1.5;
     double motorStopSpeedRpm = 1.5;
+    // 0x35 reports integer RPM.  Below 1 RPM, use high-resolution 0x36
+    // position changes to estimate a filtered motor speed for the inner loop.
+    double motorEncoderSpeedFilterSeconds = 0.04;
 
     // 当前位置在启动时清零，所以软限位也是相对水平零位的正负脉冲范围。
     int motorSoftLimitSteps = 130;
@@ -284,7 +264,7 @@ inline bool validateConfig(const AppConfig& config)
     const double halfPipeCm = config.pipeLengthCm * 0.5;
     if (!std::isfinite(config.task3OffsetCm) ||
         config.task3OffsetCm <= 0.0 ||
-        // 第3题允许目标正好落在可见有效段端点（例如管长10 cm、偏移5 cm）。
+        // Task 3 allows a target exactly at the visible rolling endpoint.
         config.task3OffsetCm > halfPipeCm ||
         !std::isfinite(config.task3NegativeTargetBiasCm) ||
         config.task3NegativeTargetBiasCm < 0.0 ||
@@ -292,50 +272,6 @@ inline bool validateConfig(const AppConfig& config)
         !std::isfinite(config.task3PositiveToleranceCm) ||
         config.task3PositiveToleranceCm <= 0.0 ||
         config.task3ArrivalConfirmFrames < 1 ||
-        !std::isfinite(config.task3MinimumTravelAngleDeg) ||
-        config.task3MinimumTravelAngleDeg <= 0.0 ||
-        config.task3MinimumTravelAngleDeg > config.maximumPipeAngleDeg ||
-        !std::isfinite(config.task3ReturnAngleLimitDeg) ||
-        config.task3ReturnAngleLimitDeg <= 0.0 ||
-        config.task3ReturnAngleLimitDeg >
-            config.task3MinimumTravelAngleDeg ||
-        config.task3ReturnAngleLimitDeg > config.maximumPipeAngleDeg ||
-        !std::isfinite(config.task3ReturnCruiseSpeedCmS) ||
-        config.task3ReturnCruiseSpeedCmS <= 0.0 ||
-        !std::isfinite(config.task3ReturnSpeedKpDegPerCmS) ||
-        config.task3ReturnSpeedKpDegPerCmS <= 0.0 ||
-        !std::isfinite(config.task3ReturnApproachZoneCm) ||
-        config.task3ReturnApproachZoneCm <= 0.0 ||
-        config.task3ReturnApproachZoneCm >
-            config.task3MaximumBrakeStartDistanceCm ||
-        !std::isfinite(config.task3ReturnBrakeAngleLimitDeg) ||
-        config.task3ReturnBrakeAngleLimitDeg <= 0.0 ||
-        config.task3ReturnBrakeAngleLimitDeg > config.maximumPipeAngleDeg ||
-        config.task3ReturnBrakeAngleLimitDeg <
-            config.task3ReturnAngleLimitDeg ||
-        !std::isfinite(config.task3ReturnKd) ||
-        config.task3ReturnKd < 0.0 ||
-        !std::isfinite(config.task3BrakingAccelerationCmS2) ||
-        config.task3BrakingAccelerationCmS2 <= 0.0 ||
-        !std::isfinite(config.task3BrakingMarginCm) ||
-        config.task3BrakingMarginCm < 0.0 ||
-        !std::isfinite(config.task3MaximumBrakeStartDistanceCm) ||
-        config.task3MaximumBrakeStartDistanceCm <= 0.0 ||
-        !std::isfinite(config.task3BrakeReleaseHysteresisCm) ||
-        config.task3BrakeReleaseHysteresisCm < 0.0 ||
-        !std::isfinite(config.task3SettleZoneCm) ||
-        config.task3SettleZoneCm <= 0.0 ||
-        !std::isfinite(config.task3SettleAngleLimitDeg) ||
-        config.task3SettleAngleLimitDeg <= 0.0 ||
-        config.task3SettleAngleLimitDeg > config.maximumPipeAngleDeg ||
-        !std::isfinite(config.task3CreepAngleDeg) ||
-        config.task3CreepAngleDeg <= 0.0 ||
-        config.task3CreepAngleDeg > config.task3SettleAngleLimitDeg ||
-        !std::isfinite(config.task3CreepErrorCm) ||
-        config.task3CreepErrorCm < 0.0 ||
-        config.task3CreepErrorCm > config.task3SettleZoneCm ||
-        !std::isfinite(config.task3CreepSpeedCmS) ||
-        config.task3CreepSpeedCmS < 0.0 ||
         !std::isfinite(config.task3FinalToleranceCm) ||
         config.task3FinalToleranceCm <= 0.0 ||
         !std::isfinite(config.task3FinalRightToleranceCm) ||
@@ -347,18 +283,31 @@ inline bool validateConfig(const AppConfig& config)
         config.task3FinalStableMs < 0 ||
         config.task3TimeLimitMs < 1000) {
         std::fprintf(stderr,
-            "invalid TASK 3 parameter in main.cpp\n");
+            "invalid TASK 3 target-flow parameter in main.cpp\n");
         return false;
     }
 
-    if (config.kp < 0.0 || config.kd < 0.0 ||
+    if (!std::isfinite(config.task3PositionKpDegPerCm) ||
+        config.task3PositionKpDegPerCm <= 0.0 ||
+        !std::isfinite(config.task3VelocityKdDegPerCmS) ||
+        config.task3VelocityKdDegPerCmS < 0.0 ||
+        !std::isfinite(config.task3IntegralKiDegPerCmSecond) ||
+        config.task3IntegralKiDegPerCmSecond <= 0.0 ||
+        !std::isfinite(config.task3IntegralZoneCm) ||
+        config.task3IntegralZoneCm <= 0.0 ||
+        !std::isfinite(config.task3IntegralSpeedLimitCmS) ||
+        config.task3IntegralSpeedLimitCmS <= 0.0 ||
+        !std::isfinite(config.task3IntegralLimitCmSeconds) ||
+        config.task3IntegralLimitCmSeconds <= 0.0 ||
+        !std::isfinite(config.task3OutputAngleLimitDeg) ||
+        config.task3OutputAngleLimitDeg <= 0.0 ||
         config.speedFilterSeconds < 0.005 ||
-        config.centerDeadbandCm < 0.0 ||
-        config.stopSpeedCmS < 0.0 ||
+        config.speedDifferenceFrames != 2 ||
         config.maximumPipeAngleDeg <= 0.0 ||
         config.maximumPipeAngleDeg > 10.0 ||
+        config.task3OutputAngleLimitDeg > config.maximumPipeAngleDeg ||
         config.angleSlewDegS <= 0.0) {
-        std::fprintf(stderr, "invalid PD or angle-limit parameter\n");
+        std::fprintf(stderr, "invalid TASK 3 PDI or angle-limit parameter\n");
         return false;
     }
 
@@ -411,6 +360,9 @@ inline bool validateConfig(const AppConfig& config)
         config.motorPositionToleranceSteps <= 0.0 ||
         !std::isfinite(config.motorStopSpeedRpm) ||
         config.motorStopSpeedRpm < 0.0 ||
+        !std::isfinite(config.motorEncoderSpeedFilterSeconds) ||
+        config.motorEncoderSpeedFilterSeconds < 0.005 ||
+        config.motorEncoderSpeedFilterSeconds > 0.5 ||
         config.motorSoftLimitSteps < 1 ||
         config.motorReplyTimeoutMs < 2 ||
         config.motorReplyTimeoutMs > 100) {

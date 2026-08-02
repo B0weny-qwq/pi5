@@ -132,6 +132,95 @@ void testSmallPipeAngleTarget()
     assert(std::abs(speedRpm) < 1.0);
 }
 
+void testLowSpeedFeedbackAndQuantization()
+{
+    AppConfig config;
+    config.pulsesPerRevolution = 3200;
+    config.motorRpm = 6;
+    config.motorEncoderSpeedFilterSeconds = 0.04;
+
+    EncoderSpeedEstimator estimator(config);
+    constexpr double dt = 0.02;
+    double positionSteps = 0.0;
+    double estimatedSpeedRpm = estimator.update(
+        positionSteps, 0.0, dt);
+    for (int index = 0; index < 20; ++index) {
+        positionSteps += 1.0 / 60.0 *
+            config.pulsesPerRevolution * dt;
+        estimatedSpeedRpm = estimator.update(
+            positionSteps, 0.0, dt);
+    }
+    assert(std::abs(estimatedSpeedRpm - 1.0) < 0.02);
+
+    VelocityCommandQuantizer quantizer;
+    double transmittedRpmSum = 0.0;
+    for (int index = 0; index < 100; ++index) {
+        const double wireRpm = quantizer.update(0.40);
+        assert(wireRpm == 0.0 || wireRpm == 1.0);
+        transmittedRpmSum += wireRpm;
+    }
+    assert(std::abs(transmittedRpmSum - 40.0) <= 1.0);
+
+    quantizer.reset();
+    transmittedRpmSum = 0.0;
+    for (int index = 0; index < 100; ++index) {
+        const double wireRpm = quantizer.update(-0.40);
+        assert(wireRpm == 0.0 || wireRpm == -1.0);
+        transmittedRpmSum += wireRpm;
+    }
+    assert(std::abs(transmittedRpmSum + 40.0) <= 1.0);
+}
+
+void testSmallTargetWithIntegerZdtFeedback()
+{
+    AppConfig config;
+    config.pulsesPerRevolution = 3200;
+    config.motorRpm = 6;
+    config.motorPositionKpRpmPerStep = 0.045;
+    config.motorVelocityKpPerSecond = 8.0;
+    config.motorMaximumAccelerationRpmS = 20.0;
+    config.motorMaximumJerkRpmS3 = 300.0;
+    config.motorBrakingAccelerationRpmS = 8.0;
+    config.motorPositionToleranceSteps = 1.5;
+    config.motorStopSpeedRpm = 1.0;
+    config.motorSoftLimitSteps = 130;
+    config.motorEncoderSpeedFilterSeconds = 0.04;
+
+    VelocityModePositionController controller(config);
+    EncoderSpeedEstimator estimator(config);
+    VelocityCommandQuantizer quantizer;
+    constexpr double dt = 0.02;
+    double positionSteps = 0.0;
+    double physicalSpeedRpm = 0.0;
+    double reportedSpeedRpm = 0.0;
+    double maximumPositionSteps = 0.0;
+
+    for (int index = 0; index < 250; ++index) {
+        const double feedbackSpeedRpm = estimator.update(
+            positionSteps, reportedSpeedRpm, dt);
+        const MotorLoopTelemetry state = controller.update(
+            17, positionSteps, feedbackSpeedRpm, dt);
+        const double wireSpeedRpm = quantizer.update(
+            state.commandSpeedRpm);
+        assert(std::abs(wireSpeedRpm) <= config.motorRpm);
+
+        physicalSpeedRpm = approach(
+            physicalSpeedRpm, wireSpeedRpm, 82.0 * dt);
+        positionSteps += physicalSpeedRpm / 60.0 *
+            config.pulsesPerRevolution * dt;
+        reportedSpeedRpm = std::round(physicalSpeedRpm);
+        maximumPositionSteps = std::max(
+            maximumPositionSteps, positionSteps);
+    }
+
+    std::fprintf(stderr,
+                 "integer feedback target position=%.3f peak=%.3f speed=%.3f\n",
+                 positionSteps, maximumPositionSteps, physicalSpeedRpm);
+    assert(std::abs(positionSteps - 17.0) < 3.0);
+    assert(maximumPositionSteps < 24.0);
+    assert(std::abs(physicalSpeedRpm) < 1.0);
+}
+
 } // namespace
 
 int main()
@@ -139,6 +228,8 @@ int main()
     testVelocityFrame();
     testCascadedController();
     testSmallPipeAngleTarget();
+    testLowSpeedFeedbackAndQuantization();
+    testSmallTargetWithIntegerZdtFeedback();
     std::puts("motor velocity controller tests passed");
     return 0;
 }

@@ -7,7 +7,7 @@
 //
 // 完整数据流：
 // 摄像头采集线程 -> SteelBallDetector -> PipeAxis厘米位置 -> BallStateEstimator速度
-// -> Task3MotionController分阶段角度 -> 倾角变化率限制 -> MechanismModel目标轴位
+// -> Task3MotionController位置PDI角度 -> 倾角变化率限制 -> MechanismModel目标轴位
 // -> MotorCommander位置/速度/加速度串级环 -> ZDT 0xF6速度命令 -> GPIO14/TXD。
 // ============================================================================
 
@@ -256,7 +256,8 @@ inline int runTask3App(const AppConfig& config)
         config.centerCalibrationPoint,
         config.useThreePointPositionCalibration);
     const PipeAxis pipeAxis(config);
-    BallStateEstimator estimator(config.speedFilterSeconds);
+    BallStateEstimator estimator(
+        config.speedFilterSeconds, config.speedDifferenceFrames);
     const MechanismModel mechanism(config);
     Task3Sequence task3(config);
     Task3MotionController motionController(config);
@@ -272,6 +273,7 @@ inline int runTask3App(const AppConfig& config)
     if (config.csv) {
         std::printf(
             "frame,time,measured,target_cm,position_cm,error_cm,speed_cm_s,"
+            "speed_two_frame_cm_s,"
             "requested_angle_deg,applied_angle_deg,motor_target_steps,"
             "motor_actual_steps,motor_target_rpm,motor_actual_rpm,"
             "motor_command_rpm,motor_acceleration_rpm_s,confidence\n");
@@ -287,6 +289,7 @@ inline int runTask3App(const AppConfig& config)
     double positionCm = 0.0;
     double errorCm = 0.0;
     double speedCmS = 0.0;
+    double rawTwoFrameSpeedCmS = 0.0;
     double rawPositionCm = 0.0;
 
     // requested是PD或丢球保护要求的角度，applied是变化率限制后真正发给机构的角度。
@@ -331,22 +334,21 @@ inline int runTask3App(const AppConfig& config)
             positionCm = rawPositionCm;
             estimator.update(positionCm, now);
             speedCmS = estimator.speedCmS();
+            rawTwoFrameSpeedCmS = estimator.rawTwoFrameSpeedCmS();
             task3.update(positionCm, speedCmS, now);
             targetCm = task3.targetCm();
             errorCm = positionCm - targetCm;
 
-            // 第3题不再全程使用一个PD。角度规划器明确区分：
-            // 去+5固定驱动、返回远处固定驱动、按v^2/(2a)制动、终点小幅保持。
-            // 因此速度项不会在只走一小段时撤掉倾角，也不会从+5刚折返
-            // 就在离-5很远的位置反向。
             motionCommand = motionController.update(
-                task3.phase(), errorCm, speedCmS);
+                task3.phase(), errorCm, speedCmS, loopDt);
             requestedAngleDeg = motionCommand.angleDeg;
             angleAtLastMeasurementDeg = requestedAngleDeg;
             lastMeasurementTime = now;
             hadMeasurement = true;
         } else if (hadMeasurement && lastMeasurementTime >= 0.0) {
             task3.onMeasurementLost();
+            estimator.onMeasurementLost();
+            rawTwoFrameSpeedCmS = 0.0;
             const double lostMs = (now - lastMeasurementTime) * 1000.0;
             if (lostMs <= config.lostHoldMs) {
                 requestedAngleDeg = angleAtLastMeasurementDeg;
@@ -358,11 +360,15 @@ inline int runTask3App(const AppConfig& config)
             } else {
                 requestedAngleDeg = 0.0;
                 speedCmS = 0.0;
+                rawTwoFrameSpeedCmS = 0.0;
                 motionCommand = {};
             }
         } else {
             task3.onMeasurementLost();
+            estimator.onMeasurementLost();
             requestedAngleDeg = 0.0;
+            speedCmS = 0.0;
+            rawTwoFrameSpeedCmS = 0.0;
             motionCommand = {};
         }
 
@@ -393,7 +399,7 @@ inline int runTask3App(const AppConfig& config)
 
         if (config.csv) {
             std::printf(
-                "%llu,%.6f,%d,%.4f,%.4f,%+.4f,%+.4f,%+.5f,%+.5f,%d,"
+                "%llu,%.6f,%d,%.4f,%.4f,%+.4f,%+.4f,%+.4f,%+.5f,%+.5f,%d,"
                 "%+.3f,%+.3f,%+.3f,%+.3f,%+.3f,%.3f\n",
                 static_cast<unsigned long long>(sequence),
                 now,
@@ -402,6 +408,7 @@ inline int runTask3App(const AppConfig& config)
                 positionCm,
                 errorCm,
                 speedCmS,
+                rawTwoFrameSpeedCmS,
                 requestedAngleDeg,
                 appliedAngleDeg,
                 motorSteps,
@@ -543,12 +550,15 @@ inline int runTask3App(const AppConfig& config)
             char motionText[128];
             std::snprintf(
                 motionText, sizeof(motionText),
-                "MODE=%s stopDist=%.2fcm",
+                "MODE=%s P=%+.3f D=%+.3f I=%+.3f v2=%+.2f",
                 task3MotionModeText(motionCommand.mode),
-                motionCommand.stoppingDistanceCm);
+                motionCommand.proportionalAngleDeg,
+                motionCommand.derivativeAngleDeg,
+                motionCommand.integralAngleDeg,
+                rawTwoFrameSpeedCmS);
             cv::putText(displayFrame, motionText, {10, 176},
                         cv::FONT_HERSHEY_SIMPLEX, 0.43,
-                        motionCommand.mode == Task3MotionMode::ReturnBrake
+                        motionCommand.integralWindowActive
                             ? cv::Scalar(0, 80, 255)
                             : cv::Scalar(220, 220, 220),
                         1, cv::LINE_AA);
@@ -576,6 +586,7 @@ inline int runTask3App(const AppConfig& config)
                 motionController.reset();
                 estimator.reset();
                 hadMeasurement = false;
+                rawTwoFrameSpeedCmS = 0.0;
                 lastMeasurementTime = -1.0;
                 angleAtLastMeasurementDeg = 0.0;
                 targetCm = task3.targetCm();
@@ -598,6 +609,7 @@ inline int runTask3App(const AppConfig& config)
                     armed = true;
                     centerReadyFrames = 0;
                     hadMeasurement = false;
+                    rawTwoFrameSpeedCmS = 0.0;
                     lastMeasurementTime = -1.0;
                     angleAtLastMeasurementDeg = 0.0;
                     std::fprintf(stderr, "control ARMED for TASK 3\n");
@@ -613,6 +625,7 @@ inline int runTask3App(const AppConfig& config)
                 config.useThreePointPositionCalibration);
             estimator.reset();
             hadMeasurement = false;
+            rawTwoFrameSpeedCmS = 0.0;
             lastMeasurementTime = -1.0;
             std::fprintf(stderr,
                 "vision tracker reset; put ball at O and wait for green circle\n");

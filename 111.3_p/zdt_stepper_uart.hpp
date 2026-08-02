@@ -395,7 +395,92 @@ struct MotorLoopTelemetry {
     double targetSpeedRpm = 0.0;
     double actualSpeedRpm = 0.0;
     double commandSpeedRpm = 0.0;
+    double wireCommandSpeedRpm = 0.0;
     double commandAccelerationRpmS = 0.0;
+};
+
+class EncoderSpeedEstimator {
+    const AppConfig& config_;
+    bool initialized_ = false;
+    double previousPositionSteps_ = 0.0;
+    double filteredSpeedRpm_ = 0.0;
+
+public:
+    explicit EncoderSpeedEstimator(const AppConfig& config)
+        : config_(config) {}
+
+    void reset()
+    {
+        initialized_ = false;
+        previousPositionSteps_ = 0.0;
+        filteredSpeedRpm_ = 0.0;
+    }
+
+    double update(double positionSteps,
+                  double reportedSpeedRpm,
+                  double dt)
+    {
+        const double boundedDt = std::clamp(dt, 0.001, 0.10);
+        if (!initialized_) {
+            initialized_ = true;
+            previousPositionSteps_ = positionSteps;
+            filteredSpeedRpm_ = reportedSpeedRpm;
+            return filteredSpeedRpm_;
+        }
+
+        const double encoderSpeedRpm =
+            (positionSteps - previousPositionSteps_) * 60.0 /
+            (static_cast<double>(config_.pulsesPerRevolution) * boundedDt);
+        previousPositionSteps_ = positionSteps;
+
+        // The 0x35 integer result is useful at 1 RPM and above. For fine
+        // positioning, its zero is quantization rather than proof of no motion.
+        const double speedSampleRpm = std::clamp(
+            std::abs(reportedSpeedRpm) >= 0.5 ?
+                reportedSpeedRpm : encoderSpeedRpm,
+            -static_cast<double>(config_.motorRpm),
+             static_cast<double>(config_.motorRpm));
+        const double alpha = boundedDt /
+            (config_.motorEncoderSpeedFilterSeconds + boundedDt);
+        filteredSpeedRpm_ += alpha *
+            (speedSampleRpm - filteredSpeedRpm_);
+        return filteredSpeedRpm_;
+    }
+};
+
+class VelocityCommandQuantizer {
+    double fractionalRpm_ = 0.0;
+    int direction_ = 0;
+
+public:
+    void reset()
+    {
+        fractionalRpm_ = 0.0;
+        direction_ = 0;
+    }
+
+    double update(double requestedRpm)
+    {
+        if (std::abs(requestedRpm) < 1e-9) {
+            reset();
+            return 0.0;
+        }
+
+        const int direction = requestedRpm > 0.0 ? 1 : -1;
+        if (direction != direction_) {
+            fractionalRpm_ = 0.0;
+            direction_ = direction;
+        }
+
+        const double magnitude = std::abs(requestedRpm);
+        double integerRpm = std::floor(magnitude);
+        fractionalRpm_ += magnitude - integerRpm;
+        if (fractionalRpm_ >= 1.0) {
+            integerRpm += 1.0;
+            fractionalRpm_ -= 1.0;
+        }
+        return static_cast<double>(direction) * integerRpm;
+    }
 };
 
 class VelocityModePositionController {
@@ -497,6 +582,10 @@ public:
 class MotorCommander {
     EmmV5Motor& motor_;
     VelocityModePositionController controller_;
+    EncoderSpeedEstimator speedEstimator_;
+    VelocityCommandQuantizer velocityQuantizer_;
+    static constexpr int kFineTargetMagnitudeSteps = 40;
+    static constexpr double kFinePositionErrorSteps = 40.0;
     int minimumIntervalMs_ = 33;
     int targetSteps_ = 0;
     int64_t lastCycleMs_ = 0;
@@ -510,9 +599,27 @@ class MotorCommander {
         const double dt = lastCycleMs_ == 0 ?
             minimumIntervalMs_ / 1000.0 :
             std::clamp((nowMs - lastCycleMs_) / 1000.0, 0.001, 0.10);
+        // Fractional-RPM pulse density is only for the tiny O-5 holding angles.
+        // The O+5 travel target is about 52 steps and needs the original
+        // continuous velocity loop to overcome the push-pull mechanism load.
+        const bool finePositioning =
+            std::abs(targetSteps_) <= kFineTargetMagnitudeSteps &&
+            std::abs(static_cast<double>(targetSteps_) -
+                     state.positionSteps) <= kFinePositionErrorSteps;
+        double feedbackSpeedRpm = state.speedRpm;
+        if (finePositioning) {
+            feedbackSpeedRpm = speedEstimator_.update(
+                state.positionSteps, state.speedRpm, dt);
+        } else {
+            speedEstimator_.reset();
+            velocityQuantizer_.reset();
+        }
         telemetry_ = controller_.update(
-            targetSteps_, state.positionSteps, state.speedRpm, dt);
-        if (!motor_.setVelocityRpm(telemetry_.commandSpeedRpm)) {
+            targetSteps_, state.positionSteps, feedbackSpeedRpm, dt);
+        telemetry_.wireCommandSpeedRpm = finePositioning ?
+            velocityQuantizer_.update(telemetry_.commandSpeedRpm) :
+            std::round(telemetry_.commandSpeedRpm);
+        if (!motor_.setVelocityRpm(telemetry_.wireCommandSpeedRpm)) {
             return false;
         }
         lastCycleMs_ = nowMs;
@@ -523,6 +630,7 @@ public:
     MotorCommander(EmmV5Motor& motor, const AppConfig& config)
         : motor_(motor),
           controller_(config),
+          speedEstimator_(config),
           minimumIntervalMs_(std::max(
               1, 1000 / config.motorCommandHz)) {}
 

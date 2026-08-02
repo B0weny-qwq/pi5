@@ -28,7 +28,7 @@ architecture="$(uname -m)"
 compiler_version="$(g++ -dumpfullversion -dumpversion)"
 echo "Building on Linux ${architecture} with g++ ${compiler_version}"
 
-# 当前文件夹是第3题速度模式串级控制版：钢球阶段控制输出目标水管角度，
+# 当前文件夹是第3题速度模式串级控制版：钢球PDI外环输出目标水管角度，
 # 电机层读取ZDT编码器位置和速度，再通过位置/速度/加速度环发送0xF6。
 # -O3用于树莓派端视觉和控制计算；pkg-config自动加入OpenCV 4头文件和库；
 # pthread用于OpenCV和程序中的标准线程/等待功能。

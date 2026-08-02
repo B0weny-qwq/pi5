@@ -1,7 +1,7 @@
 // main.cpp
 // ============================================================================
-// 第3题预测制动版：O到O+5固定驱动，到点立即折返；返回途中按速度计算
-// 制动距离，最后在O-5用小幅PD稳定。视觉每帧同时使用反光暗斑和完整霍夫圆，
+// 第3题位置PDI版：状态机只切换O+5/O-5目标，角度每帧由位置误差、两帧
+// 速度和终点小积分共同计算。视觉每帧同时使用反光暗斑和完整霍夫圆，
 // SSH/X11预览速度不参与识别或控制判断。
 // 本文件也是唯一需要经常改参数的文件。
 //
@@ -139,92 +139,44 @@ ball_stepper::AppConfig makeUserConfig()
     // x=194仍是真实-5标定点，不修改视觉坐标含义。
     config.task3NegativeTargetBiasCm = 0.0;
 
-    // 题目只要求在+5 cm处“到达后折返”，允许最大误差1 cm，不要求停稳。
-    // 真实位置越过+4.00 cm后连续2帧确认再折返；利用剩余惯性接近+5，
-    // 单个错误颜色候选把状态机从O附近直接推进到返程。
-    config.task3PositiveToleranceCm = 2.00;
+    // +5 is a real passing point, not an early braking trigger.  The state
+    // machine changes target only after two real detections within 0.25 cm.
+    config.task3PositiveToleranceCm = 0.25;
     config.task3ArrivalConfirmFrames = 2;
 
-    // 两倍版幅度过大，按现场要求整体降低30%为0.91°。
-    // maximumPipeAngleDeg必须同步，否则最终请求会被另一项重新截断。
-    config.task3MinimumTravelAngleDeg = 0.35;
-
-    // 返程倾角由两倍版0.20°降低30%为0.14°。
-    config.task3ReturnAngleLimitDeg = 0.0728;
-
-    // 保留配置字段用于兼容，但远距离返程已恢复固定0.10°；接近O-5后才提前制动。
-    config.task3ReturnCruiseSpeedCmS = 4.5;
-    config.task3ReturnSpeedKpDegPerCmS = 0.05;
-    config.task3ReturnApproachZoneCm = 0.80;
-
-    // 【真正解决提前回正的参数】只有连续确认越过O-5后，才允许反向制动。
-    config.task3ReturnBrakeAngleLimitDeg = 0.10192;
-
-    // 该Kd现在只用于-5附近的小幅稳定，不参与远距离返程，所以不会再
-    // 出现“离-5还很远，Kd就把水管反向抬起”的问题。
-    config.task3ReturnKd = 0.010;
-
-    // 【最重要的现场动态参数】实机仍在O-5前停下，说明原先7.0 cm/s^2
-    // 把制动距离估计得过长；提高到8.5后会明显推迟满幅反向制动。
-    // 程序按stopDistance=v^2/(2a)+margin决定刹车点：
-    // 制动余量维持0.10 cm；返程速度由速度环限制，制动仍由目标锁存控制。
-    // 若下一次变成冲过O-5，只把0.10提高到0.25，不要再改两个角度。
-    config.task3BrakingAccelerationCmS2 = 8.5;
-    config.task3BrakingMarginCm = 0.10;
-
-    // 【本次核心修正】离O-5超过2.5 cm时不进入终点制动窗口；更重要的是，
-    // 在目标穿越锁存以前完全禁止反向制动，防止钢球在O-5前被推回中心。
-    // 该距离仍作为越过目标后的安全制动窗口，滞环参数保留以兼容配置格式。
-    config.task3MaximumBrakeStartDistanceCm = 2.5;
-    config.task3BrakeReleaseHysteresisCm = 0.25;
-
-    // 终点制动和保持也从两倍版同步降低30%。
-    config.task3SettleZoneCm = 2.5;
-    config.task3SettleAngleLimitDeg = 0.060;
-    config.task3CreepAngleDeg = 0.015;
-    config.task3CreepErrorCm = 0.15;
-    config.task3CreepSpeedCmS = 0.25;
-
-    // 题目允许O-5最大位置误差≤1 cm；这里收紧到0.50 cm，避免在刻度前
-    // 0.8 cm就显示完成，让终点小幅控制继续把钢球送到更接近-5的位置。
-    // 同时还必须满足“速度≤1.5 cm/s”，不能只靠高速穿过目标就判定完成。
-    // 并连续维持80 ms后，画面才显示TASK3 DONE。
+    // O-5 completion only controls the status display.  The same PDI loop
+    // continues holding the target after completion.
     config.task3FinalToleranceCm = 0.20;
-    // 球在补偿目标右侧时只允许0.02 cm误差；左侧也只允许0.20 cm，
-    // 防止状态机在明显偏离-5的位置提前进入HOLD。
     config.task3FinalRightToleranceCm = 0.02;
-    // 结束判定只用于决定何时显示 TASK3 DONE，不会改变左右运动幅度。
-    // 允许低速阈值由 1.0 放宽到 1.5 cm/s，避免球已到 O-5 附近却因轻微抖动一直等到超时。
     config.task3FinalSpeedCmS = 1.5;
-
-    // 已满足位置和低速门限后连续80 ms即可判定完成；HOLD仍会继续保持O-5。
     config.task3FinalStableMs = 80;
-
-    // 题目规定第3题总时间≤5 s；超过后画面显示TIMEOUT，但程序仍继续控制到-5 cm。
     config.task3TimeLimitMs = 5000;
 
-    // ---------------- 4. 钢球PD外环 ----------------
-    // 控制规律：目标水管角度 = Kp×位置误差 + Kd×钢球速度。
-    // 正角度定义为axisRight端升高，让右侧钢球向左减速。
+    // ---------------- 4. 钢球 PDI 外环 ----------------
+    // angle = Kp * (position - target) + Kd * two-frame velocity + Ki * I.
+    // Kp*5 cm = 0.35 deg, so the O -> O+5 initial output keeps the proven
+    // magnitude without hard-coding any angle.  At 5 cm/s, D contributes
+    // 0.10 deg in the braking direction.
+    config.task3PositionKpDegPerCm = 0.070;
+    config.task3VelocityKdDegPerCmS = 0.020;
 
-    // Kp只用于-5附近2.5 cm范围的小幅稳定；远距离行程由上面的固定幅度控制。
-    config.kp = 0.025;  // deg/cm
+    // I exists only inside the final 0.50 cm window and only below 1 cm/s.
+    // Its maximum output is 0.120 * 0.75 = 0.090 deg.
+    config.task3IntegralKiDegPerCmSecond = 0.120;
+    config.task3IntegralZoneCm = 0.50;
+    config.task3IntegralSpeedLimitCmS = 1.0;
+    config.task3IntegralLimitCmSeconds = 0.75;
 
-    // 第3题阶段控制不读取通用kd；保留它仅供基础PdController兼容使用。
-    config.kd = 0.0;
+    // Uniform outer-loop saturation.  This is a safety/output scale, never a
+    // fixed travel command.  The global mechanism limit remains wider.
+    config.task3OutputAngleLimitDeg = 0.35;
 
-    // 制动距离依赖速度，滤波不能太滞后。速度显示明显抖动时再加到0.045。
-    config.speedFilterSeconds = 0.035;
+    // v[n] = (x[n] - x[n-2]) / (t[n] - t[n-2]); low-pass only removes vision
+    // jitter after that two-frame difference.
+    config.speedDifferenceFrames = 2;
+    config.speedFilterSeconds = 0.020;
 
-    // 位置与速度同时进入这两个范围才认为球稳定，避免中心附近电机反复微动。
-    config.centerDeadbandCm = 0.12;
-    config.stopSpeedCmS = 0.8;
-
-    // 全局硬上限同步降低30%为0.91°。
     config.maximumPipeAngleDeg = 0.91;
-
-    // 只提高角度建立速度，不改变0.91°幅度。25°/s使正反切换更快，仍保留
-    // 平滑过渡；若实机出现明显机械冲击，再单独降回20°/s。
     config.angleSlewDegS = 3.0;
 
     // ---------------- 5. 曲柄连杆尺寸 ----------------
@@ -298,6 +250,7 @@ ball_stepper::AppConfig makeUserConfig()
     // 约1.5脉冲且实测转速不高于1.5 RPM才认为目标轴位已稳定。
     config.motorPositionToleranceSteps = 1.5;
     config.motorStopSpeedRpm = 1.0;
+    config.motorEncoderSpeedFilterSeconds = 0.04;
 
     // 0.91°按当前曲柄模型约136脉冲，软限位收回到±180并保留余量。
     config.motorSoftLimitSteps = 180;
@@ -370,12 +323,13 @@ int main()
     const ball_stepper::AppConfig config = makeUserConfig();
     std::fprintf(stderr,
         "TASK3 TUNING: minus5_x=%.1f bias=%.2f "
-        "angle(+5)=%.3f angle(-5)=%.3f cruise=%.2f\n",
+        "Kp=%.3f Kd=%.3f Ki=%.3f limit=%.3f\n",
         config.minus5CalibrationPoint.x,
         config.task3NegativeTargetBiasCm,
-        config.task3MinimumTravelAngleDeg,
-        config.task3ReturnAngleLimitDeg,
-        config.task3ReturnCruiseSpeedCmS);
+        config.task3PositionKpDegPerCm,
+        config.task3VelocityKdDegPerCmS,
+        config.task3IntegralKiDegPerCmSecond,
+        config.task3OutputAngleLimitDeg);
     return ball_stepper::runTask3App(config);
 }
 
