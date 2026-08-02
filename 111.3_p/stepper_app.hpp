@@ -22,6 +22,7 @@
 #include "zdt_stepper_uart.hpp"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -57,9 +58,63 @@ inline std::string cameraFourccText(double rawFourcc)
     return std::string(text);
 }
 
+class RuntimeDiagnosticLog {
+    bool enabled_ = false;
+    std::FILE* file_ = nullptr;
+    double startTime_ = 0.0;
+
+public:
+    explicit RuntimeDiagnosticLog(const AppConfig& config)
+        : enabled_(config.runtimeLogEnabled),
+          startTime_(secondsNow())
+    {
+        if (!enabled_) return;
+        file_ = std::fopen(config.runtimeLogPath.c_str(), "w");
+        if (!file_) {
+            std::fprintf(stderr, "WARNING: cannot open runtime log %s\n",
+                         config.runtimeLogPath.c_str());
+        }
+    }
+
+    ~RuntimeDiagnosticLog()
+    {
+        if (file_) std::fclose(file_);
+    }
+
+    void write(const char* format, ...)
+    {
+        if (!enabled_) return;
+
+        char message[900];
+        va_list arguments;
+        va_start(arguments, format);
+        std::vsnprintf(message, sizeof(message), format, arguments);
+        va_end(arguments);
+
+        char line[1024];
+        std::snprintf(line, sizeof(line), "[diag +%.3fs] %s\n",
+                      secondsNow() - startTime_, message);
+        std::fputs(line, stderr);
+        std::fflush(stderr);
+        if (file_) {
+            std::fputs(line, file_);
+            std::fflush(file_);
+        }
+    }
+};
+
 inline int runTask3App(const AppConfig& config)
 {
     if (!validateConfig(config)) return 1;
+
+    RuntimeDiagnosticLog diagnostics(config);
+    diagnostics.write(
+        "START motor=%d port=%s baud=%d address=%d ppr=%d cmd_hz=%d "
+        "max_rpm=%d slope=%d armed_at_start=%d",
+        config.motorEnabled ? 1 : 0, config.serialPort.c_str(),
+        config.serialBaud, config.motorAddress, config.pulsesPerRevolution,
+        config.motorCommandHz, config.motorRpm,
+        config.motorSpeedSlopeRpmS, config.startArmed ? 1 : 0);
 
     // 视觉头文件的编译期尺寸也来自main.cpp宏；这里再次防止两套数值不一致。
     if (config.cameraWidth != CAMERA_WIDTH ||
@@ -67,6 +122,7 @@ inline int runTask3App(const AppConfig& config)
         config.cameraFps != CAMERA_FPS) {
         std::fprintf(stderr,
             "camera config does not match BALL_CFG_CAMERA_* in main.cpp\n");
+        diagnostics.write("ERROR camera compile-time configuration mismatch");
         return 1;
     }
 
@@ -74,6 +130,7 @@ inline int runTask3App(const AppConfig& config)
     cv::VideoCapture camera(config.cameraIndex, cv::CAP_V4L2);
     if (!camera.isOpened()) {
         std::fprintf(stderr, "cannot open camera %d\n", config.cameraIndex);
+        diagnostics.write("ERROR cannot open camera index=%d", config.cameraIndex);
         return 1;
     }
 
@@ -169,6 +226,8 @@ inline int runTask3App(const AppConfig& config)
         } else if (!config.gui && config.motorEnabled && !config.startArmed) {
             std::fprintf(stderr,
                 "headless paused mode needs an interactive terminal for keys\n");
+            diagnostics.write(
+                "ERROR terminal key input unavailable while startArmed=0");
             return 1;
         }
     }
@@ -182,12 +241,14 @@ inline int runTask3App(const AppConfig& config)
         // 启动顺序：打开串口 -> 使能 -> 停止旧动作 -> 当前位置清零
         // -> 读取编码器位置/速度 -> 发送0 RPM速度命令。
         if (!serial.openPort(config.serialPort, config.serialBaud)) {
+            diagnostics.write("ERROR cannot open ZDT serial port");
             return 1;
         }
         motor = std::make_unique<EmmV5Motor>(serial, config);
 
         if (!motor->enable()) {
             std::fprintf(stderr, "ZDT enable command failed\n");
+            diagnostics.write("ERROR ZDT enable command failed");
             return 1;
         }
         std::this_thread::sleep_for(
@@ -196,6 +257,7 @@ inline int runTask3App(const AppConfig& config)
         // 驱动器刚使能后先停止，防止继续执行断电前或上次程序留下的运动。
         if (!motor->stop()) {
             std::fprintf(stderr, "ZDT startup stop command failed\n");
+            diagnostics.write("ERROR ZDT startup stop command failed");
             return 1;
         }
         std::this_thread::sleep_for(
@@ -205,6 +267,7 @@ inline int runTask3App(const AppConfig& config)
         // 执行这一行之前，使用者必须保证水管真的处于机械水平位置。
         if (!motor->clearPosition()) {
             std::fprintf(stderr, "ZDT clear-position command failed\n");
+            diagnostics.write("ERROR ZDT clear-position command failed");
             motor->stop();
             return 1;
         }
@@ -214,19 +277,46 @@ inline int runTask3App(const AppConfig& config)
         commander = std::make_unique<MotorCommander>(*motor, config);
         if (!commander->force(0)) {
             std::fprintf(stderr,
-                "ZDT speed-mode initialization failed; check Response=Receive/Both\n");
+                "ZDT speed-mode initialization failed; check UART, ID, baud and checksum\n");
+            diagnostics.write(
+                "ERROR ZDT initial 0 RPM query/command cycle failed");
             motor->stop();
             return 1;
         }
+
+        uint8_t motorStatus = 0;
+        uint8_t originStatus = 0;
+        const bool motorStatusOk = motor->readMotorStatus(motorStatus);
+        const bool originStatusOk = motor->readOriginStatus(originStatus);
+        const MotorLoopTelemetry startupTelemetry = commander->telemetry();
+        diagnostics.write(
+            "ZDT_READY pulse=%.1f rpm=%.1f cmd=%.1f wire=%.1f "
+            "motor_status=%s0x%02X enabled=%d arrived=%d stall=%d protect=%d "
+            "origin_status=%s0x%02X encoder_ready=%d calibration_ready=%d",
+            startupTelemetry.actualSteps, startupTelemetry.actualSpeedRpm,
+            startupTelemetry.commandSpeedRpm,
+            startupTelemetry.wireCommandSpeedRpm,
+            motorStatusOk ? "" : "ERR:",
+            static_cast<unsigned>(motorStatus),
+            motorStatusOk && (motorStatus & 0x01) ? 1 : 0,
+            motorStatusOk && (motorStatus & 0x02) ? 1 : 0,
+            motorStatusOk && (motorStatus & 0x04) ? 1 : 0,
+            motorStatusOk && (motorStatus & 0x08) ? 1 : 0,
+            originStatusOk ? "" : "ERR:",
+            static_cast<unsigned>(originStatus),
+            originStatusOk && (originStatus & 0x01) ? 1 : 0,
+            originStatusOk && (originStatus & 0x02) ? 1 : 0);
 
         std::fprintf(stderr,
             "ZDT velocity mode ready: %s %d baud, address=%d; current LEVEL is zero\n",
             config.serialPort.c_str(), config.serialBaud,
             config.motorAddress);
+        diagnostics.write("ZDT velocity mode ready; current LEVEL is logical zero");
     } else {
         // dry-run仍计算并显示角度与脉冲，但不会打开UART或发送任何字节。
         std::fprintf(stderr,
             "DRY-RUN: motor disabled; angle and steps are display only\n");
+        diagnostics.write("DRY_RUN motor disabled");
     }
 
     // 串口启动等待期间摄像头仍在持续采集；正式建立视觉模块前取一张
@@ -305,6 +395,7 @@ inline int runTask3App(const AppConfig& config)
 
     uint64_t sequence = 0;
     double nextVideoStreamTime = secondsNow();
+    double nextRuntimeLogTime = secondsNow();
     bool videoStreamFailureReported = false;
     std::fprintf(stderr,
         "%s: SPACE=start/abort TASK3, R=reset vision while paused, Q/ESC=exit\n",
@@ -390,11 +481,41 @@ inline int runTask3App(const AppConfig& config)
             if (!commander->update(motorSteps, millisecondsNow())) {
                 std::fprintf(stderr,
                     "ZDT velocity feedback/command failed; stopping control loop\n");
+                diagnostics.write(
+                    "ERROR ZDT cycle failed tgt=%d actual=%.1f rpm=%.1f "
+                    "cmd=%.1f wire=%.1f",
+                    motorSteps, motorTelemetry.actualSteps,
+                    motorTelemetry.actualSpeedRpm,
+                    motorTelemetry.commandSpeedRpm,
+                    motorTelemetry.wireCommandSpeedRpm);
                 communicationOk = false;
                 running.store(false);
             } else {
                 motorTelemetry = commander->telemetry();
             }
+        }
+
+        if (now >= nextRuntimeLogTime) {
+            diagnostics.write(
+                "LOOP armed=%d center_ready=%d/6 ball=%d locked=%d "
+                "confidence=%.2f px=(%.1f,%.1f) cm=%.3f target=%.3f "
+                "error=%+.3f v=%.3f v2=%.3f request=%+.4f applied=%+.4f "
+                "M[tgt=%d pos=%.1f target_rpm=%+.2f actual_rpm=%+.2f "
+                "cmd=%+.2f wire=%+.2f acc=%+.2f]",
+                armed ? 1 : 0, std::min(centerReadyFrames, 6),
+                result.measured ? 1 : 0, result.locked ? 1 : 0,
+                result.confidence,
+                result.measured ? result.center.x : -1.0f,
+                result.measured ? result.center.y : -1.0f,
+                positionCm, targetCm, errorCm, speedCmS, rawTwoFrameSpeedCmS,
+                requestedAngleDeg, appliedAngleDeg, motorSteps,
+                motorTelemetry.actualSteps, motorTelemetry.targetSpeedRpm,
+                motorTelemetry.actualSpeedRpm,
+                motorTelemetry.commandSpeedRpm,
+                motorTelemetry.wireCommandSpeedRpm,
+                motorTelemetry.commandAccelerationRpmS);
+            nextRuntimeLogTime = now +
+                config.runtimeLogIntervalMs / 1000.0;
         }
 
         if (config.csv) {
@@ -593,6 +714,7 @@ inline int runTask3App(const AppConfig& config)
                 requestedAngleDeg = 0.0;
                 std::fprintf(stderr,
                     "TASK aborted; PAUSED; pipe returning to level\n");
+                diagnostics.write("EVENT task aborted; paused and returning level");
             } else {
                 // 必须连续确认钢球确实位于O点后才能启动。视频中的失败
                 // 正是BALL LOST状态仍允许开始，随后单个错误候选推进了状态机。
@@ -601,6 +723,11 @@ inline int runTask3App(const AppConfig& config)
                         "TASK start blocked: wait for stable green ball at O "
                         "(%d/6 frames)\n",
                         centerReadyFrames);
+                    diagnostics.write(
+                        "EVENT start blocked: center_ready=%d/6 ball=%d "
+                        "position=%.3f",
+                        std::min(centerReadyFrames, 6),
+                        result.measured ? 1 : 0, positionCm);
                 } else {
                     estimator.reset();
                     motionController.reset();
@@ -613,6 +740,7 @@ inline int runTask3App(const AppConfig& config)
                     lastMeasurementTime = -1.0;
                     angleAtLastMeasurementDeg = 0.0;
                     std::fprintf(stderr, "control ARMED for TASK 3\n");
+                    diagnostics.write("EVENT control armed for TASK 3");
                 }
             }
         }
@@ -629,6 +757,7 @@ inline int runTask3App(const AppConfig& config)
             lastMeasurementTime = -1.0;
             std::fprintf(stderr,
                 "vision tracker reset; put ball at O and wait for green circle\n");
+            diagnostics.write("EVENT vision tracker reset while paused");
         }
 
         // 等待采集线程发布下一张“最新画面”。若识别落后，采集线程已经
@@ -662,16 +791,20 @@ inline int runTask3App(const AppConfig& config)
     // 到位或超时后再发送立即停止，避免退出后继续推拉机构。
     if (commander && motor) {
         std::fprintf(stderr, "returning pipe to LEVEL zero...\n");
+        diagnostics.write("EVENT exiting; returning pipe to logical zero");
         if (!commander->returnToZero(config.exitReturnTimeoutMs)) {
             communicationOk = false;
             std::fprintf(stderr,
                 "WARNING: velocity-mode return to zero failed or timed out\n");
+            diagnostics.write(
+                "WARNING velocity-mode return to zero failed or timed out");
         }
 
         // 无论回零命令是否成功，最后都发送立即停止，避免程序退出后继续运动。
         if (!motor->stop()) {
             communicationOk = false;
             std::fprintf(stderr, "WARNING: final ZDT stop failed\n");
+            diagnostics.write("WARNING final ZDT stop failed");
         }
     }
 
@@ -686,8 +819,11 @@ inline int runTask3App(const AppConfig& config)
     }
     if (!config.motorEnabled) {
         std::fprintf(stderr, "DRY-RUN finished; no ZDT command was sent\n");
+        diagnostics.write("EXIT dry-run communication_ok=%d", communicationOk ? 1 : 0);
     } else {
         std::fprintf(stderr, "ZDT control finished\n");
+        diagnostics.write("EXIT motor control communication_ok=%d",
+                          communicationOk ? 1 : 0);
     }
     return communicationOk ? 0 : 1;
 }

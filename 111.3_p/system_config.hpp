@@ -163,6 +163,9 @@ struct AppConfig {
     bool gui = true;
     bool terminalKeys = true;
     bool csv = false;
+    bool runtimeLogEnabled = true;
+    std::string runtimeLogPath = "ball2_task3_runtime.log";
+    int runtimeLogIntervalMs = 200;
     int previewEveryNFrames = 2;
 
     // ---------------- E611网络图传 ----------------
@@ -391,6 +394,15 @@ inline bool validateConfig(const AppConfig& config)
         config.motorEnabled && !config.startArmed) {
         std::fprintf(stderr,
             "headless motor mode requires terminalKeys or startArmed=true\n");
+        return false;
+    }
+    if (config.runtimeLogEnabled && config.runtimeLogPath.empty()) {
+        std::fprintf(stderr, "runtime log path is empty\n");
+        return false;
+    }
+    if (config.runtimeLogIntervalMs < 50 ||
+        config.runtimeLogIntervalMs > 5000) {
+        std::fprintf(stderr, "invalid runtime log interval\n");
         return false;
     }
 

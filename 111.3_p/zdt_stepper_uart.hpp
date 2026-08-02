@@ -306,6 +306,18 @@ class EmmV5Motor {
         return true;
     }
 
+    bool readStatusByte(uint8_t commandCode, uint8_t& status)
+    {
+        const uint8_t command[] = {address_, commandCode, ZDT_TAIL};
+        uint8_t response[4]{};
+        if (!exchange(command, sizeof(command), commandCode,
+                      response, sizeof(response), true)) {
+            return false;
+        }
+        status = response[2];
+        return true;
+    }
+
 public:
     EmmV5Motor(SerialPort& serial, const AppConfig& config)
         : serial_(serial),
@@ -385,6 +397,16 @@ public:
             response[2], response + 3, 4);
         positionSteps = static_cast<double>(positionStepsRaw);
         return true;
+    }
+
+    bool readMotorStatus(uint8_t& status)
+    {
+        return readStatusByte(0x3A, status);
+    }
+
+    bool readOriginStatus(uint8_t& status)
+    {
+        return readStatusByte(0x3B, status);
     }
 
     bool readMotionState(ZdtMotionState& state)
