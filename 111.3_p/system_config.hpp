@@ -33,6 +33,7 @@ struct AppConfig {
     int cameraWidth = 640;
     int cameraHeight = 480;
     int cameraFps = 120;
+    std::string cameraFourcc = "MJPG";
     bool disableAutofocus = true;
 
     // false表示完全不改摄像头当前曝光设置。某些120 FPS UVC摄像头一旦被
@@ -83,30 +84,35 @@ struct AppConfig {
     int task3TimeLimitMs = 5000;
 
     // ---------------- 第3题钢球位置 PDI 外环 ----------------
-    // error = position - target.  Kd directly multiplies the signed velocity
-    // estimated from the current detection and the detection two frames ago.
-    double task3PositionKpDegPerCm = 0.070;
+    // error = position - target. Negative pipe angle moves the ball right;
+    // positive pipe angle moves it left. The linkage is not symmetric, so P,
+    // the normal output limit, and breakaway authority are tuned per direction.
+    double task3MoveRightPositionKpDegPerCm = 0.300;
+    double task3MoveLeftPositionKpDegPerCm = 0.035;
     double task3VelocityKdDegPerCmS = 0.020;
     // I is active only near either target.  It is reset whenever the target
     // changes and is capped by the two values below.
     double task3IntegralKiDegPerCmSecond = 0.120;
-    double task3IntegralZoneCm = 0.50;
-    double task3IntegralSpeedLimitCmS = 1.0;
-    double task3IntegralLimitCmSeconds = 0.75;
+    double task3IntegralZoneCm = 0.80;
+    double task3IntegralSpeedLimitCmS = 1.2;
+    double task3IntegralLimitCmSeconds = 0.90;
 
     // If a large position error remains while the measured ball speed stays
     // near zero, slowly add a bounded breakaway angle.  This compensates
     // linkage play and static friction from feedback instead of hard-coding a
     // minimum motor angle.  The term decays as soon as the ball responds.
-    double task3BreakawayErrorCm = 1.0;
+    double task3BreakawayErrorCm = 0.35;
     double task3BreakawaySpeedCmS = 0.35;
-    double task3BreakawayDelaySeconds = 0.12;
-    double task3BreakawayRampDegPerSecond = 0.50;
-    double task3BreakawayMaximumAngleDeg = 0.15;
+    double task3BreakawayDelaySeconds = 0.08;
+    double task3BreakawayRampDegPerSecond = 0.80;
+    double task3MoveRightBreakawayMaximumAngleDeg = 0.16;
+    double task3MoveLeftBreakawayMaximumAngleDeg = 0.12;
 
-    // This is a limiter, not a commanded travel angle.  0.35 deg matches the
-    // previous verified O -> O+5 peak amplitude while P and D set every value.
-    double task3OutputAngleLimitDeg = 0.35;
+    // These are directional safety/output scales, never fixed travel commands.
+    // The PDI sum is continuously calculated and clamped to this asymmetric
+    // interval: [-moveRightLimit, +moveLeftLimit].
+    double task3MoveRightOutputAngleLimitDeg = 0.75;
+    double task3MoveLeftOutputAngleLimitDeg = 0.40;
     double speedFilterSeconds = 0.020;
     int speedDifferenceFrames = 2;
     double maximumPipeAngleDeg = 1.0;
@@ -231,6 +237,7 @@ inline bool validateConfig(const AppConfig& config)
 {
     if (config.cameraWidth < 160 || config.cameraHeight < 120 ||
         config.cameraFps < 1 || config.cameraFps > 240 ||
+        config.cameraFourcc.size() != 4 ||
         !std::isfinite(config.exposureAbsolute) ||
         (config.configureExposure && config.useManualExposure &&
          config.exposureAbsolute <= 0.0)) {
@@ -310,8 +317,10 @@ inline bool validateConfig(const AppConfig& config)
         return false;
     }
 
-    if (!std::isfinite(config.task3PositionKpDegPerCm) ||
-        config.task3PositionKpDegPerCm <= 0.0 ||
+    if (!std::isfinite(config.task3MoveRightPositionKpDegPerCm) ||
+        config.task3MoveRightPositionKpDegPerCm <= 0.0 ||
+        !std::isfinite(config.task3MoveLeftPositionKpDegPerCm) ||
+        config.task3MoveLeftPositionKpDegPerCm <= 0.0 ||
         !std::isfinite(config.task3VelocityKdDegPerCmS) ||
         config.task3VelocityKdDegPerCmS < 0.0 ||
         !std::isfinite(config.task3IntegralKiDegPerCmSecond) ||
@@ -330,16 +339,25 @@ inline bool validateConfig(const AppConfig& config)
         config.task3BreakawayDelaySeconds < 0.0 ||
         !std::isfinite(config.task3BreakawayRampDegPerSecond) ||
         config.task3BreakawayRampDegPerSecond <= 0.0 ||
-        !std::isfinite(config.task3BreakawayMaximumAngleDeg) ||
-        config.task3BreakawayMaximumAngleDeg < 0.0 ||
-        !std::isfinite(config.task3OutputAngleLimitDeg) ||
-        config.task3OutputAngleLimitDeg <= 0.0 ||
+        !std::isfinite(
+            config.task3MoveRightBreakawayMaximumAngleDeg) ||
+        config.task3MoveRightBreakawayMaximumAngleDeg < 0.0 ||
+        !std::isfinite(
+            config.task3MoveLeftBreakawayMaximumAngleDeg) ||
+        config.task3MoveLeftBreakawayMaximumAngleDeg < 0.0 ||
+        !std::isfinite(config.task3MoveRightOutputAngleLimitDeg) ||
+        config.task3MoveRightOutputAngleLimitDeg <= 0.0 ||
+        !std::isfinite(config.task3MoveLeftOutputAngleLimitDeg) ||
+        config.task3MoveLeftOutputAngleLimitDeg <= 0.0 ||
         config.speedFilterSeconds < 0.005 ||
         config.speedDifferenceFrames != 2 ||
         config.maximumPipeAngleDeg <= 0.0 ||
         config.maximumPipeAngleDeg > 10.0 ||
-        config.task3OutputAngleLimitDeg +
-                config.task3BreakawayMaximumAngleDeg >
+        config.task3MoveRightOutputAngleLimitDeg +
+                config.task3MoveRightBreakawayMaximumAngleDeg >
+            config.maximumPipeAngleDeg ||
+        config.task3MoveLeftOutputAngleLimitDeg +
+                config.task3MoveLeftBreakawayMaximumAngleDeg >
             config.maximumPipeAngleDeg ||
         config.angleSlewDegS <= 0.0) {
         std::fprintf(stderr, "invalid TASK 3 PDI or angle-limit parameter\n");

@@ -170,6 +170,8 @@ public:
                 "elapsed_s,armed,center_ready_frames,ball_measured,"
                 "ball_locked,confidence,pixel_x,pixel_y,position_cm,"
                 "target_cm,error_cm,speed_cm_s,two_frame_speed_cm_s,"
+                "p_angle_deg,d_angle_deg,i_angle_deg,base_limit_deg,"
+                "breakaway_limit_deg,"
                 "requested_angle_deg,breakaway_angle_deg,applied_angle_deg,"
                 "motor_target_steps,"
                 "motor_actual_steps,motor_target_rpm,motor_actual_rpm,"
@@ -224,7 +226,7 @@ public:
         double speedCmS,
         double rawTwoFrameSpeedCmS,
         double requestedAngleDeg,
-        double breakawayAngleDeg,
+        const Task3MotionCommand& motionCommand,
         double appliedAngleDeg,
         int motorTargetSteps,
         const MotorLoopTelemetry& motorTelemetry)
@@ -233,11 +235,18 @@ public:
         std::fprintf(
             csvFile_,
             "%.6f,%d,%d,%d,%d,%.5f,%.3f,%.3f,%.5f,%.5f,%+.5f,%+.5f,"
-            "%+.5f,%+.6f,%+.6f,%+.6f,%d,%+.3f,%+.3f,%+.3f,%+.3f,%+.3f,%+.3f\n",
+            "%+.5f,%+.6f,%+.6f,%+.6f,%.6f,%.6f,"
+            "%+.6f,%+.6f,%+.6f,%d,%+.3f,%+.3f,%+.3f,%+.3f,%+.3f,%+.3f\n",
             secondsNow() - startTime_, armed ? 1 : 0, centerReadyFrames,
             ballMeasured ? 1 : 0, ballLocked ? 1 : 0, confidence, pixelX,
             pixelY, positionCm, targetCm, errorCm, speedCmS,
-            rawTwoFrameSpeedCmS, requestedAngleDeg, breakawayAngleDeg,
+            rawTwoFrameSpeedCmS,
+            motionCommand.proportionalAngleDeg,
+            motionCommand.derivativeAngleDeg,
+            motionCommand.integralAngleDeg,
+            motionCommand.baseOutputLimitDeg,
+            motionCommand.breakawayOutputLimitDeg,
+            requestedAngleDeg, motionCommand.breakawayAngleDeg,
             appliedAngleDeg,
             motorTargetSteps, motorTelemetry.actualSteps,
             motorTelemetry.targetSpeedRpm, motorTelemetry.actualSpeedRpm,
@@ -285,10 +294,12 @@ inline int runTask3App(const AppConfig& config)
         return 1;
     }
 
-    // MJPG降低640x480@120 FPS的USB带宽；缓冲区1减少控制过时画面的延迟。
+    // 像素格式由main.cpp配置；缓冲区1减少控制使用过时画面的延迟。
     const bool fourccSet = camera.set(
         cv::CAP_PROP_FOURCC,
-        cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+        cv::VideoWriter::fourcc(
+            config.cameraFourcc[0], config.cameraFourcc[1],
+            config.cameraFourcc[2], config.cameraFourcc[3]));
     const bool widthSet = camera.set(
         cv::CAP_PROP_FRAME_WIDTH, config.cameraWidth);
     const bool heightSet = camera.set(
@@ -601,6 +612,8 @@ inline int runTask3App(const AppConfig& config)
         std::printf(
             "frame,time,measured,target_cm,position_cm,error_cm,speed_cm_s,"
             "speed_two_frame_cm_s,"
+            "p_angle_deg,d_angle_deg,i_angle_deg,base_limit_deg,"
+            "breakaway_limit_deg,"
             "requested_angle_deg,breakaway_angle_deg,applied_angle_deg,"
             "motor_target_steps,"
             "motor_actual_steps,motor_target_rpm,motor_actual_rpm,"
@@ -737,8 +750,9 @@ inline int runTask3App(const AppConfig& config)
             diagnostics.write(
                 "LOOP armed=%d center_ready=%d/6 ball=%d locked=%d "
                 "confidence=%.2f px=(%.1f,%.1f) cm=%.3f target=%.3f "
-                "error=%+.3f v=%.3f v2=%.3f request=%+.4f "
-                "breakaway=%+.4f applied=%+.4f "
+                "error=%+.3f v=%.3f v2=%.3f "
+                "P=%+.4f D=%+.4f I=%+.4f request=%+.4f "
+                "breakaway=%+.4f lim=%.3f+%.3f applied=%+.4f "
                 "M[tgt=%d pos=%.1f target_rpm=%+.2f actual_rpm=%+.2f "
                 "cmd=%+.2f wire=%+.2f acc=%+.2f]",
                 armed ? 1 : 0, std::min(centerReadyFrames, 6),
@@ -747,7 +761,12 @@ inline int runTask3App(const AppConfig& config)
                 result.measured ? result.center.x : -1.0f,
                 result.measured ? result.center.y : -1.0f,
                 positionCm, targetCm, errorCm, speedCmS, rawTwoFrameSpeedCmS,
+                motionCommand.proportionalAngleDeg,
+                motionCommand.derivativeAngleDeg,
+                motionCommand.integralAngleDeg,
                 requestedAngleDeg, motionCommand.breakawayAngleDeg,
+                motionCommand.baseOutputLimitDeg,
+                motionCommand.breakawayOutputLimitDeg,
                 appliedAngleDeg, motorSteps,
                 motorTelemetry.actualSteps, motorTelemetry.targetSpeedRpm,
                 motorTelemetry.actualSpeedRpm,
@@ -760,7 +779,7 @@ inline int runTask3App(const AppConfig& config)
                 result.measured ? result.center.x : -1.0f,
                 result.measured ? result.center.y : -1.0f,
                 positionCm, targetCm, errorCm, speedCmS, rawTwoFrameSpeedCmS,
-                requestedAngleDeg, motionCommand.breakawayAngleDeg,
+                requestedAngleDeg, motionCommand,
                 appliedAngleDeg, motorSteps,
                 motorTelemetry);
             nextRuntimeLogTime = now +
@@ -769,7 +788,8 @@ inline int runTask3App(const AppConfig& config)
 
         if (config.csv) {
             std::printf(
-                "%llu,%.6f,%d,%.4f,%.4f,%+.4f,%+.4f,%+.4f,%+.5f,%+.5f,%+.5f,%d,"
+                "%llu,%.6f,%d,%.4f,%.4f,%+.4f,%+.4f,%+.4f,"
+                "%+.5f,%+.5f,%+.5f,%.5f,%.5f,%+.5f,%+.5f,%+.5f,%d,"
                 "%+.3f,%+.3f,%+.3f,%+.3f,%+.3f,%.3f\n",
                 static_cast<unsigned long long>(sequence),
                 now,
@@ -779,6 +799,11 @@ inline int runTask3App(const AppConfig& config)
                 errorCm,
                 speedCmS,
                 rawTwoFrameSpeedCmS,
+                motionCommand.proportionalAngleDeg,
+                motionCommand.derivativeAngleDeg,
+                motionCommand.integralAngleDeg,
+                motionCommand.baseOutputLimitDeg,
+                motionCommand.breakawayOutputLimitDeg,
                 requestedAngleDeg,
                 motionCommand.breakawayAngleDeg,
                 appliedAngleDeg,

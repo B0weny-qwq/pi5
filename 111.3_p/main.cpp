@@ -94,6 +94,7 @@ ball_stepper::AppConfig makeUserConfig()
     config.cameraWidth = BALL_CFG_CAMERA_WIDTH;
     config.cameraHeight = BALL_CFG_CAMERA_HEIGHT;
     config.cameraFps = BALL_CFG_CAMERA_FPS;
+    config.cameraFourcc = "MJPG";
 
     // 固定安装后关闭自动对焦，避免识别过程中镜头反复改变清晰度和钢球外观。
     config.disableAutofocus = true;
@@ -106,7 +107,7 @@ ball_stepper::AppConfig makeUserConfig()
     config.exposureAbsolute = 45.0;  // 如后续重开手动曝光，先从4.5 ms试起。
 
     // ---------------- 2. ROI和水管轴线 ----------------
-// 黄框和实际识别ROI都覆盖整段可见水管；最新三个位置为x=176、285、390。
+// 黄框和实际识别ROI都覆盖整段可见水管；最新三个位置为x=167、275、398。
     // 两者使用同一个矩形，避免钢球明明还在黄色框内却已经离开算法搜索范围。
     config.pipeDisplayArea = cv::Rect(10, 210, 535, 65);
     config.roi = config.pipeDisplayArea;
@@ -114,20 +115,20 @@ ball_stepper::AppConfig makeUserConfig()
 
     // 摄像头目前看不到整根水管，因此先用第3题-5 cm和+5 cm两个实测点
     // 定义运动轴线方向；实际位置换算由下面的三点分段标定完成。
-    config.axisLeft = cv::Point2f(176.0f, 240.0f);
-    config.axisRight = cv::Point2f(390.0f, 240.0f);
+    config.axisLeft = cv::Point2f(167.0f, 247.0f);
+    config.axisRight = cv::Point2f(398.0f, 247.0f);
     config.axisConfigured = true;
 
     // 【必须实测】上面两个图像点之间对应的真实有效滚球长度，单位厘米。
     config.pipeLengthCm = 10.0;
 
-    // 【第3题核心标定】最新实测：O-5/O/O+5的x分别约198/300/410。
-    // 左侧5 cm对应102像素，右侧5 cm对应110像素，分段换算会分别使用。
-    // 三个点当前都使用实测水管轴线y=240。
+    // 【第3题核心标定】本次图传实测：O-5/O/O+5约为167/275/398。
+    // 左侧5 cm对应108像素，右侧5 cm对应123像素，分段换算会分别使用。
+    // 三个点当前都使用实测水管轴线y=247。
     config.useThreePointPositionCalibration = true;
-    config.minus5CalibrationPoint = cv::Point2f(176.0f, 240.0f);
-    config.centerCalibrationPoint = cv::Point2f(285.0f, 240.0f);
-    config.plus5CalibrationPoint = cv::Point2f(390.0f, 240.0f);
+    config.minus5CalibrationPoint = cv::Point2f(167.0f, 247.0f);
+    config.centerCalibrationPoint = cv::Point2f(275.0f, 247.0f);
+    config.plus5CalibrationPoint = cv::Point2f(398.0f, 247.0f);
 
     // 兼容基础控制模块的初始目标，比赛运行时实际目标由题目管理器自动给出。
     config.targetCm = config.pipeLengthCm * 0.5;
@@ -153,32 +154,38 @@ ball_stepper::AppConfig makeUserConfig()
     config.task3TimeLimitMs = 5000;
 
     // ---------------- 4. 钢球 PDI 外环 ----------------
-    // angle = Kp * (position - target) + Kd * two-frame velocity + Ki * I.
-    // Kp*5 cm = 0.35 deg, so the O -> O+5 initial output keeps the proven
-    // magnitude without hard-coding any angle.  At 5 cm/s, D contributes
-    // 0.10 deg in the braking direction.
-    config.task3PositionKpDegPerCm = 0.070;
+    // angle = Kp(direction) * (position - target)
+    //       + Kd * two-frame velocity + Ki * I.
+    // Negative angle moves the ball right; positive angle moves it left. The
+    // measured linkage needs much more rightward authority, so the two P gains
+    // are intentionally different. These remain feedback gains, not fixed
+    // travel angles.
+    config.task3MoveRightPositionKpDegPerCm = 0.300;
+    config.task3MoveLeftPositionKpDegPerCm = 0.035;
     config.task3VelocityKdDegPerCmS = 0.020;
 
-    // I exists only inside the final 0.50 cm window and only below 1 cm/s.
-    // Its maximum output is 0.120 * 0.75 = 0.090 deg.
+    // I opens only inside the final 0.80 cm window and below 1.2 cm/s. Its
+    // maximum output is 0.120 * 0.90 = 0.108 deg, so P still dominates.
     config.task3IntegralKiDegPerCmSecond = 0.120;
-    config.task3IntegralZoneCm = 0.50;
-    config.task3IntegralSpeedLimitCmS = 1.0;
-    config.task3IntegralLimitCmSeconds = 0.75;
+    config.task3IntegralZoneCm = 0.80;
+    config.task3IntegralSpeedLimitCmS = 1.2;
+    config.task3IntegralLimitCmSeconds = 0.90;
 
-    // Large error + almost zero measured ball speed means the linkage has not
-    // transferred the motor motion.  After 120 ms, increase the PDI output
-    // smoothly by at most 0.15 deg; remove it as soon as the ball responds.
-    config.task3BreakawayErrorCm = 1.0;
+    // Breakaway overlaps the final I window, avoiding the old 0.5-1.0 cm gap
+    // where neither compensation was active. It decays as soon as motion is
+    // measured, so this is still feedback driven rather than a minimum angle.
+    config.task3BreakawayErrorCm = 0.35;
     config.task3BreakawaySpeedCmS = 0.35;
-    config.task3BreakawayDelaySeconds = 0.12;
-    config.task3BreakawayRampDegPerSecond = 0.50;
-    config.task3BreakawayMaximumAngleDeg = 0.15;
+    config.task3BreakawayDelaySeconds = 0.08;
+    config.task3BreakawayRampDegPerSecond = 0.80;
+    config.task3MoveRightBreakawayMaximumAngleDeg = 0.16;
+    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.12;
 
-    // Uniform outer-loop saturation.  This is a safety/output scale, never a
-    // fixed travel command.  The global mechanism limit remains wider.
-    config.task3OutputAngleLimitDeg = 0.35;
+    // Asymmetric PDI saturation. Rightward motion can reach -0.75 deg normally
+    // and -0.91 deg only when feedback confirms a stall. Leftward motion is
+    // limited to +0.40/+0.52 deg because that side of the mechanism is stronger.
+    config.task3MoveRightOutputAngleLimitDeg = 0.75;
+    config.task3MoveLeftOutputAngleLimitDeg = 0.40;
 
     // v[n] = (x[n] - x[n-2]) / (t[n] - t[n-2]); low-pass only removes vision
     // jitter after that two-frame difference.
@@ -199,7 +206,7 @@ ball_stepper::AppConfig makeUserConfig()
     config.pulsesPerRevolution = 200;
 
     // +1表示正脉冲应使axisRight端升高；实际相反时只改成-1。
-    config.motorSign = -1;
+    config.motorSign = +1;
 
     // ---------------- 6. 水管角度到电机脉冲实测标定表 ----------------
     // 【最终实机强烈建议填写】没有标定表时使用理想曲柄公式，只适合检查思路。
@@ -309,7 +316,7 @@ ball_stepper::AppConfig makeUserConfig()
     config.csv = false;
     config.runtimeLogEnabled = true;
     config.runtimeLogDirectory = "logs";
-    config.runtimeLogEvent = "task1_pdi";
+    config.runtimeLogEvent = "task1_pdi_asym";
     config.runtimeLogIntervalMs = 200;
 
     // 每个控制帧都提交最新预览。SSH/X11显示慢时只丢旧预览帧，
@@ -347,13 +354,18 @@ int main()
     const ball_stepper::AppConfig config = makeUserConfig();
     std::fprintf(stderr,
         "TASK3 TUNING: minus5_x=%.1f bias=%.2f "
-        "Kp=%.3f Kd=%.3f Ki=%.3f limit=%.3f\n",
+        "Kp[R=%.3f L=%.3f] Kd=%.3f Ki=%.3f "
+        "limit[R=%.3f+%.3f L=%.3f+%.3f]\n",
         config.minus5CalibrationPoint.x,
         config.task3NegativeTargetBiasCm,
-        config.task3PositionKpDegPerCm,
+        config.task3MoveRightPositionKpDegPerCm,
+        config.task3MoveLeftPositionKpDegPerCm,
         config.task3VelocityKdDegPerCmS,
         config.task3IntegralKiDegPerCmSecond,
-        config.task3OutputAngleLimitDeg);
+        config.task3MoveRightOutputAngleLimitDeg,
+        config.task3MoveRightBreakawayMaximumAngleDeg,
+        config.task3MoveLeftOutputAngleLimitDeg,
+        config.task3MoveLeftBreakawayMaximumAngleDeg);
     return ball_stepper::runTask3App(config);
 }
 

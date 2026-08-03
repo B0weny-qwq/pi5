@@ -5,8 +5,9 @@
 // The task state machine only selects +5 cm, -5 cm, and completion.  It does
 // not select a drive angle.  Every measured frame uses the same outer loop:
 //
-//   pipeAngle = Kp * positionError + Kd * ballVelocity + Ki * integralError
-//               + bounded feedback-triggered breakaway compensation
+//   pipeAngle = Kp(direction) * positionError
+//               + Kd * ballVelocity + Ki * integralError
+//               + bounded feedback-triggered breakaway compensation(direction)
 //
 // Positive pipe angle raises axisRight, so a positive position error or a ball
 // moving to the right both ask the ball to move back to the left.
@@ -32,6 +33,9 @@ struct Task3MotionCommand {
     double derivativeAngleDeg = 0.0;
     double integralAngleDeg = 0.0;
     double breakawayAngleDeg = 0.0;
+    double positionKpDegPerCm = 0.0;
+    double baseOutputLimitDeg = 0.0;
+    double breakawayOutputLimitDeg = 0.0;
     bool integralWindowActive = false;
     bool breakawayActive = false;
     Task3MotionMode mode = Task3MotionMode::Level;
@@ -55,6 +59,40 @@ class Task3MotionController {
     double breakawayDwellSeconds_ = 0.0;
     double breakawayAngleDeg_ = 0.0;
     int breakawayDirection_ = 0;
+
+    double positionKp(double errorCm) const
+    {
+        return errorCm < 0.0 ?
+            config_.task3MoveRightPositionKpDegPerCm :
+            config_.task3MoveLeftPositionKpDegPerCm;
+    }
+
+    double baseOutputLimit(int direction) const
+    {
+        return direction < 0 ?
+            config_.task3MoveRightOutputAngleLimitDeg :
+            config_.task3MoveLeftOutputAngleLimitDeg;
+    }
+
+    double breakawayOutputLimit(int direction) const
+    {
+        return direction < 0 ?
+            config_.task3MoveRightBreakawayMaximumAngleDeg :
+            config_.task3MoveLeftBreakawayMaximumAngleDeg;
+    }
+
+    double clampBaseOutput(double angleDeg) const
+    {
+        return std::clamp(
+            angleDeg,
+            -config_.task3MoveRightOutputAngleLimitDeg,
+             config_.task3MoveLeftOutputAngleLimitDeg);
+    }
+
+    double baseSaturationDistance(double angleDeg) const
+    {
+        return std::abs(angleDeg - clampBaseOutput(angleDeg));
+    }
 
     void resetIntegral()
     {
@@ -98,8 +136,9 @@ public:
         }
 
         const double dt = std::clamp(dtSeconds, 0.002, 0.05);
+        command.positionKpDegPerCm = positionKp(errorCm);
         command.proportionalAngleDeg =
-            config_.task3PositionKpDegPerCm * errorCm;
+            command.positionKpDegPerCm * errorCm;
         command.derivativeAngleDeg =
             config_.task3VelocityKdDegPerCmS * speedCmS;
 
@@ -128,9 +167,9 @@ public:
                 config_.task3IntegralKiDegPerCmSecond * candidateIntegral;
 
             // Conditional integration prevents the small I term from winding
-            // farther into the common output limiter.
-            if (std::abs(candidateSum) <= config_.task3OutputAngleLimitDeg ||
-                std::abs(candidateSum) < std::abs(currentSum)) {
+            // farther into either side of the asymmetric output limiter.
+            if (baseSaturationDistance(candidateSum) <=
+                baseSaturationDistance(currentSum)) {
                 integralErrorCmSeconds_ = candidateIntegral;
             }
         }
@@ -140,15 +179,16 @@ public:
             config_.task3IntegralKiDegPerCmSecond *
             integralErrorCmSeconds_;
 
-        const double baseAngleDeg = std::clamp(
+        const double baseAngleDeg = clampBaseOutput(
             command.proportionalAngleDeg + command.derivativeAngleDeg +
-                command.integralAngleDeg,
-            -config_.task3OutputAngleLimitDeg,
-             config_.task3OutputAngleLimitDeg);
+                command.integralAngleDeg);
 
         const int desiredDirection =
             command.proportionalAngleDeg > 1e-9 ? 1 :
             command.proportionalAngleDeg < -1e-9 ? -1 : 0;
+        command.baseOutputLimitDeg = baseOutputLimit(desiredDirection);
+        command.breakawayOutputLimitDeg =
+            breakawayOutputLimit(desiredDirection);
         if (desiredDirection != 0 &&
             desiredDirection != breakawayDirection_) {
             breakawayDwellSeconds_ = 0.0;
@@ -176,7 +216,7 @@ public:
                 config_.task3BreakawayDelaySeconds) {
                 const double targetBreakaway =
                     static_cast<double>(desiredDirection) *
-                    config_.task3BreakawayMaximumAngleDeg;
+                    command.breakawayOutputLimitDeg;
                 breakawayAngleDeg_ = approach(
                     breakawayAngleDeg_, targetBreakaway,
                     config_.task3BreakawayRampDegPerSecond * dt);
@@ -191,12 +231,12 @@ public:
         command.breakawayAngleDeg = breakawayAngleDeg_;
         command.breakawayActive =
             shouldBuildBreakaway && std::abs(breakawayAngleDeg_) > 1e-9;
-        const double breakawayOutputLimit =
-            config_.task3OutputAngleLimitDeg +
-            config_.task3BreakawayMaximumAngleDeg;
         command.angleDeg = std::clamp(
             baseAngleDeg + command.breakawayAngleDeg,
-            -breakawayOutputLimit, breakawayOutputLimit);
+            -(config_.task3MoveRightOutputAngleLimitDeg +
+              config_.task3MoveRightBreakawayMaximumAngleDeg),
+             config_.task3MoveLeftOutputAngleLimitDeg +
+              config_.task3MoveLeftBreakawayMaximumAngleDeg);
 
         if (phase == Task3Phase::HoldNegative) {
             command.mode = Task3MotionMode::HoldPdi;
