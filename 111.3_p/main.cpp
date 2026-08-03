@@ -59,8 +59,8 @@
 #define BALL_CFG_CLAHE_CLIP_LIMIT 2.2
 #define BALL_CFG_HOUGH_DP 1.0
 #define BALL_CFG_HOUGH_CANNY_HIGH 74.0
-#define BALL_CFG_HOUGH_ACCUM_ACQUIRE 9.0
-#define BALL_CFG_HOUGH_ACCUM_TRACK 10.0
+#define BALL_CFG_HOUGH_ACCUM_ACQUIRE 3.0
+#define BALL_CFG_HOUGH_ACCUM_TRACK 3.0
 #define BALL_CFG_REFINE_GRADIENT_MIN 16.0f
 #define BALL_CFG_REFINE_RESIDUAL_MAX 2.0f
 
@@ -156,12 +156,12 @@ ball_stepper::AppConfig makeUserConfig()
     // ---------------- 4. 钢球 PDI 外环 ----------------
     // 直管左右机械条件接近，两侧使用完全相同的位置P增益。
     // 5 cm误差对应0.30 deg；接近目标后按误差线性减小。
-    config.task3MoveRightPositionKpDegPerCm = 0.060;
-    config.task3MoveLeftPositionKpDegPerCm = 0.060;
+    config.task3MoveRightPositionKpDegPerCm = 0.050;
+    config.task3MoveLeftPositionKpDegPerCm = 0.050;
 
     // D仍使用x[n]与x[n-2]的速度。日志显示0.015在高速过靶时制动力不足；
     // P保持柔和的0.060，D恢复0.030只增强速度阻尼，不增加静止起步推力。
-    config.task3VelocityKdDegPerCmS = 0.030;
+    config.task3VelocityKdDegPerCmS = 0.060;
 
     // I只在最后2.5 cm且球速较低时介入。最大I输出为0.250*0.80=0.20 deg，
     // 足够消除直管静差，同时比旧版0.40 deg柔和，目标反向时仍会清零。
@@ -182,15 +182,15 @@ ball_stepper::AppConfig makeUserConfig()
 
     // 直管双向基础输出和脱困输出完全对称：正常最多+/-0.60 deg，
     // 反馈确认卡滞后最多再叠加0.12 deg，但仍受总机械角度限幅保护。
-    config.task3MoveRightOutputAngleLimitDeg = 0.60;
-    config.task3MoveLeftOutputAngleLimitDeg = 0.60;
+    config.task3MoveRightOutputAngleLimitDeg = 0.80;
+    config.task3MoveLeftOutputAngleLimitDeg = 0.80;
 
     // v[n] = (x[n] - x[n-2]) / (t[n] - t[n-2]); low-pass only removes vision
     // jitter after that two-frame difference.
     config.speedDifferenceFrames = 2;
     config.speedFilterSeconds = 0.020;
 
-    config.maximumPipeAngleDeg = 0.91;
+    config.maximumPipeAngleDeg = 1.00;
     config.angleSlewDegS = 5.0;
 
     // ---------------- 5. 曲柄连杆尺寸 ----------------
