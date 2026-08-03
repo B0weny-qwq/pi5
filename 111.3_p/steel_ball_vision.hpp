@@ -28,6 +28,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -92,6 +93,12 @@
 #ifndef BALL_CFG_ACQUIRE_INNER_STD_MIN
 #define BALL_CFG_ACQUIRE_INNER_STD_MIN 3.0f
 #endif
+#ifndef BALL_CFG_HOUGH_INNER_STD_MIN
+#define BALL_CFG_HOUGH_INNER_STD_MIN 0.0f
+#endif
+#ifndef BALL_CFG_HOUGH_CONTRAST_MIN
+#define BALL_CFG_HOUGH_CONTRAST_MIN -255.0f
+#endif
 
 #ifndef BALL_CFG_USE_AXIS_GATE
 #define BALL_CFG_USE_AXIS_GATE 1
@@ -155,6 +162,8 @@ constexpr float ACQUIRE_EDGE_SUPPORT_MIN =
     BALL_CFG_ACQUIRE_EDGE_SUPPORT_MIN;
 constexpr float ACQUIRE_RING_MEAN_MIN = BALL_CFG_ACQUIRE_RING_MEAN_MIN;
 constexpr float ACQUIRE_INNER_STD_MIN = BALL_CFG_ACQUIRE_INNER_STD_MIN;
+constexpr float HOUGH_INNER_STD_MIN = BALL_CFG_HOUGH_INNER_STD_MIN;
+constexpr float HOUGH_CONTRAST_MIN = BALL_CFG_HOUGH_CONTRAST_MIN;
 constexpr float AXIS_GATE_PX = BALL_CFG_AXIS_GATE_PX;
 constexpr int HOUGH_INTERVAL = BALL_CFG_HOUGH_INTERVAL;
 constexpr int HOUGH_MAX_CANDIDATES = BALL_CFG_HOUGH_MAX_CANDIDATES;
@@ -288,6 +297,11 @@ class SteelBallDetector {
     float radius_ = BALL_RADIUS_EXPECTED;
     float confidence_ = 0.0f;
     Candidate pending_{};
+    // 只保存已经通过全部空间与外观门限的真实候选。三帧分量中值可消除
+    // 单帧跳到钢球边缘、阴影或反光圆弧的中心，同时不把预测点伪装成测量。
+    std::array<cv::Point2f, 3> measurementCenters_{};
+    int measurementCenterCount_ = 0;
+    int measurementCenterWriteIndex_ = 0;
     // 第3题启动前钢球必须放在O点。首次捕获只在O点附近寻找，避免
     // 程序一启动就锁到管端螺丝；失锁后该锚点更新为最后真实轨迹位置。
     cv::Point2f acquireAnchor_{};
@@ -306,6 +320,13 @@ class SteelBallDetector {
     // 暗斑定位只在当前search ROI内复用这块掩膜，不创建整帧二值图。
     cv::Mat darkMask_;
     cv::Mat darkKernel_;
+    cv::Mat textureFloat_;
+    cv::Mat textureSquare_;
+    cv::Mat textureMean_;
+    cv::Mat textureSquareMean_;
+    cv::Mat textureVariance_;
+    cv::Mat textureMask_;
+    cv::Mat textureKernel_;
     int lastHoughCandidates_ = 0;
     int lastValidCandidates_ = 0;
     int lastDarkBlobCandidates_ = 0;
@@ -328,6 +349,35 @@ class SteelBallDetector {
         const cv::Point2f relative = point - axisStart_;
         return std::abs(relative.x * direction.y -
                         relative.y * direction.x) / length;
+    }
+
+    void clearMeasurementCenters()
+    {
+        measurementCenterCount_ = 0;
+        measurementCenterWriteIndex_ = 0;
+    }
+
+    cv::Point2f filterMeasuredCenter(const cv::Point2f& center)
+    {
+        measurementCenters_[measurementCenterWriteIndex_] = center;
+        measurementCenterWriteIndex_ =
+            (measurementCenterWriteIndex_ + 1) %
+            static_cast<int>(measurementCenters_.size());
+        measurementCenterCount_ = std::min(
+            measurementCenterCount_ + 1,
+            static_cast<int>(measurementCenters_.size()));
+
+        if (measurementCenterCount_ < 3) return center;
+
+        std::array<float, 3> xs{};
+        std::array<float, 3> ys{};
+        for (int index = 0; index < 3; ++index) {
+            xs[index] = measurementCenters_[index].x;
+            ys[index] = measurementCenters_[index].y;
+        }
+        std::sort(xs.begin(), xs.end());
+        std::sort(ys.begin(), ys.end());
+        return cv::Point2f(xs[1], ys[1]);
     }
 
     static bool fitCircleLeastSquares(const std::vector<cv::Point2f>& points,
@@ -538,6 +588,10 @@ class SteelBallDetector {
                                innerMean * innerMean));
         const float innerStd = std::sqrt(variance);
         const float contrast = ringMean - innerMean;
+        if (innerStd < HOUGH_INNER_STD_MIN ||
+            contrast < HOUGH_CONTRAST_MIN) {
+            return candidate;
+        }
 
         int brightCount = 0;
         int darkCount = 0;
@@ -617,6 +671,130 @@ class SteelBallDetector {
         candidate.axisDistance = axisDistance;
         candidate.houghOnly = true;
         return candidate;
+    }
+
+    // 白色水管上钢球同时具有暗区和强反光，局部灰度方差显著高于平滑
+    // 管壁。这里用纹理而非绝对亮度生成连通区域，再交给统一的圆外观
+    // 评分复核。水管上下边缘虽也有梯度，但会被轴线带和形状门限排除。
+    std::vector<Candidate> detectTextureBlobCandidates(
+        const cv::Rect& search,
+        const cv::Point2f& expected,
+        bool tracking,
+        float trackingGate)
+    {
+        std::vector<Candidate> candidates;
+        if (search.width < 16 || search.height < 16) return candidates;
+
+        const cv::Mat graySearch = gray_(search);
+        textureFloat_.create(search.size(), CV_32F);
+        textureSquare_.create(search.size(), CV_32F);
+        textureMean_.create(search.size(), CV_32F);
+        textureSquareMean_.create(search.size(), CV_32F);
+        textureVariance_.create(search.size(), CV_32F);
+        textureMask_.create(search.size(), CV_8U);
+
+        graySearch.convertTo(textureFloat_, CV_32F);
+        cv::multiply(textureFloat_, textureFloat_, textureSquare_);
+        cv::boxFilter(textureFloat_, textureMean_, CV_32F,
+                      cv::Size(9, 9), cv::Point(-1, -1), true,
+                      cv::BORDER_REPLICATE);
+        cv::boxFilter(textureSquare_, textureSquareMean_, CV_32F,
+                      cv::Size(9, 9), cv::Point(-1, -1), true,
+                      cv::BORDER_REPLICATE);
+        cv::multiply(textureMean_, textureMean_, textureVariance_);
+        cv::subtract(textureSquareMean_, textureVariance_,
+                     textureVariance_);
+        cv::compare(textureVariance_, 18.0f * 18.0f,
+                    textureMask_, cv::CMP_GT);
+
+        // 只保留管道中心附近，直接切掉上、下管壁长边及背景结构。
+        if (axisGateEnabled_) {
+            for (int localY = 0; localY < textureMask_.rows; ++localY) {
+                uchar* row = textureMask_.ptr<uchar>(localY);
+                for (int localX = 0; localX < textureMask_.cols; ++localX) {
+                    const cv::Point2f point(
+                        static_cast<float>(search.x + localX),
+                        static_cast<float>(search.y + localY));
+                    if (distanceToAxis(point) > AXIS_GATE_PX + 3.0f) {
+                        row[localX] = 0;
+                    }
+                }
+            }
+        }
+
+        if (textureKernel_.empty()) {
+            textureKernel_ = cv::getStructuringElement(
+                cv::MORPH_ELLIPSE, cv::Size(3, 3));
+        }
+        cv::morphologyEx(textureMask_, textureMask_, cv::MORPH_OPEN,
+                         textureKernel_);
+        cv::morphologyEx(textureMask_, textureMask_, cv::MORPH_CLOSE,
+                         textureKernel_, cv::Point(-1, -1), 2);
+
+        std::vector<std::vector<cv::Point>> contours;
+        cv::findContours(textureMask_, contours, cv::RETR_EXTERNAL,
+                         cv::CHAIN_APPROX_SIMPLE);
+        candidates.reserve(contours.size());
+
+        for (const std::vector<cv::Point>& contour : contours) {
+            const double area = cv::contourArea(contour);
+            if (area < 65.0 || area > 1250.0 || contour.size() < 5) {
+                continue;
+            }
+            const cv::Rect bounds = cv::boundingRect(contour);
+            if (bounds.width < 11 || bounds.width > 46 ||
+                bounds.height < 11 || bounds.height > 42) {
+                continue;
+            }
+            const float aspect = static_cast<float>(
+                std::min(bounds.width, bounds.height)) /
+                std::max(1, std::max(bounds.width, bounds.height));
+            if (aspect < (tracking ? 0.42f : 0.52f)) continue;
+
+            const cv::Moments moments = cv::moments(contour, false);
+            if (std::abs(moments.m00) < 1e-6) continue;
+            const cv::Point2f center(
+                static_cast<float>(search.x + moments.m10 / moments.m00),
+                static_cast<float>(search.y + moments.m01 / moments.m00));
+            const float axisDistance = distanceToAxis(center);
+            if (axisGateEnabled_ && axisDistance > AXIS_GATE_PX) continue;
+
+            const float temporalDistance = static_cast<float>(
+                cv::norm(center - expected));
+            const float allowedDistance = tracking ? trackingGate :
+                (hasTrackHistory_ ? TRACK_GATE_MAX_PX :
+                                    INITIAL_ACQUIRE_GATE_PX);
+            if (temporalDistance > allowedDistance) continue;
+
+            const double perimeter = cv::arcLength(contour, true);
+            if (perimeter <= 1.0) continue;
+            const float circularity = static_cast<float>(
+                4.0 * CV_PI * area / (perimeter * perimeter));
+            if (circularity < (tracking ? 0.30f : 0.42f)) continue;
+
+            const float observedRadius =
+                0.25f * (bounds.width + bounds.height);
+            const float radius = clampVision(
+                observedRadius, BALL_RADIUS_MIN, BALL_RADIUS_MAX);
+            RefinedCircle textureCircle;
+            textureCircle.center = center;
+            textureCircle.radius = radius;
+            textureCircle.quality = unitScore(
+                0.60f * circularity + 0.40f * aspect);
+            Candidate candidate = scoreCircle(textureCircle);
+            if (!candidate.valid) continue;
+
+            // 纹理轮廓已经经过白管专用形状筛选，不属于运动拖影后备；
+            // 它可作为主定位，霍夫只负责一致性验证。
+            candidate.houghOnly = false;
+            candidate.contourFallback = false;
+            candidate.score = unitScore(
+                candidate.score +
+                0.05f * std::exp(-temporalDistance /
+                                  std::max(10.0f, allowedDistance)));
+            candidates.push_back(candidate);
+        }
+        return candidates;
     }
 
     // ------------------------------------------------------------------------
@@ -1057,8 +1235,14 @@ class SteelBallDetector {
 
         // 暗斑轮廓是每帧快速定位主通道。它对短拖影比完整霍夫圆更稳定。
         std::vector<Candidate> blobCandidates =
+            detectTextureBlobCandidates(search, expected, tracking,
+                                        trackingGate);
+        std::vector<Candidate> darkCandidates =
             detectDarkBlobCandidates(search, expected, tracking,
                                      trackingGate);
+        blobCandidates.insert(blobCandidates.end(),
+                              darkCandidates.begin(),
+                              darkCandidates.end());
         lastDarkBlobCandidates_ =
             static_cast<int>(blobCandidates.size());
         lastValidCandidates_ += static_cast<int>(blobCandidates.size());
@@ -1205,6 +1389,7 @@ public:
         radius_ = BALL_RADIUS_EXPECTED;
         confidence_ = 0.0f;
         pending_ = {};
+        clearMeasurementCenters();
         acquireAnchor_ = acquireAnchor;
         acquireAnchorConfigured_ = anchorConfigured;
     }
@@ -1241,24 +1426,15 @@ public:
                     300.0f * dt + misses_ * 14.0f,
                 TRACK_GATE_MIN_PX,
                 TRACK_GATE_MAX_PX);
-            const float objectHalfWidth = std::max(
-                BALL_RADIUS_MAX + 4.0f,
-                DARK_BLOB_WIDTH_MAX * 0.5f + 4.0f);
-            const int halfSize = cvCeil(
-                trackingGate + objectHalfWidth);
-            search = boundedVisionRect(
-                cv::Rect(cvRound(predicted.x) - halfSize,
-                         cvRound(predicted.y) - halfSize,
-                         halfSize * 2 + 1,
-                         halfSize * 2 + 1),
-                frame.size()) & allowed;
+            // 固定使用main.cpp配置的窄管道ROI。动态裁剪会改变CLAHE和
+            // 霍夫累加器上下文，使同一个静止钢球间歇性漏检。
+            search = allowed;
 
             if (misses_ >= 5) {
                 // 运动模糊连续丢几帧后，预测圆心可能已落后真实钢球。
                 // 暂时扩大到整个第3题ROI；候选仍受逐步扩大的预测门限、
                 // 真实尺寸、轴线、外观和半径连续性共同约束。
                 trackingGate = TRACK_GATE_MAX_PX;
-                search = allowed;
             }
         } else {
             predicted = acquireAnchorConfigured_ ?
@@ -1281,7 +1457,10 @@ public:
         Result result;
         if (locked_) {
             if (candidate.valid) {
-                const cv::Point2f residual = candidate.center - predicted;
+                if (misses_ >= 2) clearMeasurementCenters();
+                const cv::Point2f measuredCenter =
+                    filterMeasuredCenter(candidate.center);
+                const cv::Point2f residual = measuredCenter - predicted;
                 // 候选已经通过尺寸、轴线、预测距离和双检测器仲裁；适当提高
                 // 位置吸收比例以减少高速运动时的跟踪滞后。
                 center_ = predicted + residual * 0.72f;
@@ -1307,6 +1486,7 @@ public:
                     locked_ = false;
                     acquireCount_ = 0;
                     pending_ = {};
+                    clearMeasurementCenters();
                     acquireAnchor_ = center_;
                     acquireAnchorConfigured_ = true;
                     velocity_ = {};
@@ -1342,14 +1522,17 @@ public:
             } else {
                 pending_ = candidate;
                 acquireCount_ = 1;
+                clearMeasurementCenters();
             }
+            const cv::Point2f measuredCenter =
+                filterMeasuredCenter(candidate.center);
 
             const int requiredAcquireFrames =
                 ACQUIRE_FRAMES + (pending_.contourFallback ? 2 : 0);
             if (acquireCount_ >= requiredAcquireFrames) {
                 locked_ = true;
                 misses_ = 0;
-                center_ = pending_.center;
+                center_ = measuredCenter;
                 radius_ = pending_.radius;
                 confidence_ = pending_.score;
                 velocity_ = {};
@@ -1363,6 +1546,7 @@ public:
         } else {
             pending_ = {};
             acquireCount_ = 0;
+            clearMeasurementCenters();
         }
 
         result.locked = locked_;

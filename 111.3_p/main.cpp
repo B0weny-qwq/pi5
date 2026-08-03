@@ -29,7 +29,7 @@
 
 // 静止跟踪时第一名和第二名过于接近会拒绝跳目标；行进时不使用该拒绝，
 // 否则真球运动后大量霍夫候选会造成连续BALL LOST。
-#define BALL_CFG_AMBIGUITY_GAP 0.050f
+#define BALL_CFG_AMBIGUITY_GAP 0.0f
 
 #define BALL_CFG_ACQUIRE_FRAMES 3
 
@@ -45,9 +45,14 @@
 #define BALL_CFG_ACQUIRE_CONTRAST_MIN 8.0f
 #define BALL_CFG_ACQUIRE_EDGE_SUPPORT_MIN 0.28f
 #define BALL_CFG_ACQUIRE_RING_MEAN_MIN 40.0f
-#define BALL_CFG_ACQUIRE_INNER_STD_MIN 2.5f
+#define BALL_CFG_ACQUIRE_INNER_STD_MIN 16.0f
 
 // ---------------- 灰度霍夫圆专用参数 ----------------
+
+// 反光钢球内部同时存在亮斑和暗区，现场连续帧纹理标准差为28～50；
+// 白管圆弧和接头假圆只有约7～13。低于该值的霍夫圆直接拒绝。
+#define BALL_CFG_HOUGH_INNER_STD_MIN 16.0f
+#define BALL_CFG_HOUGH_CONTRAST_MIN 16.0f
 
 // 轴线已按最新画面的y=240标定，正式识别启用轴线过滤，排除管外螺丝和圆孔。
 #define BALL_CFG_USE_AXIS_GATE 1
@@ -59,8 +64,8 @@
 #define BALL_CFG_CLAHE_CLIP_LIMIT 2.2
 #define BALL_CFG_HOUGH_DP 1.0
 #define BALL_CFG_HOUGH_CANNY_HIGH 74.0
-#define BALL_CFG_HOUGH_ACCUM_ACQUIRE 8.0
-#define BALL_CFG_HOUGH_ACCUM_TRACK 8.0
+#define BALL_CFG_HOUGH_ACCUM_ACQUIRE 6.0
+#define BALL_CFG_HOUGH_ACCUM_TRACK 6.0
 #define BALL_CFG_REFINE_GRADIENT_MIN 16.0f
 #define BALL_CFG_REFINE_RESIDUAL_MAX 2.0f
 
