@@ -62,6 +62,7 @@ struct AppConfig {
     cv::Point2f minus5CalibrationPoint{};
     cv::Point2f centerCalibrationPoint{};
     cv::Point2f plus5CalibrationPoint{};
+    double task3StartCenterGatePx = 32.0;
 
     // ---------------- 第3题目标流程 ----------------
     // 钢球从O出发，先到O+task3OffsetCm，再自动去O-task3OffsetCm。

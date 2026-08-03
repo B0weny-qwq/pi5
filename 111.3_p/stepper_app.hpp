@@ -666,7 +666,8 @@ inline int runTask3App(const AppConfig& config)
         // without the later direction, color-reference or center-anchor paths.
         const Result result = detector.update(frame);
         if (!armed && result.measured &&
-            cv::norm(result.center - config.centerCalibrationPoint) <= 18.0) {
+            cv::norm(result.center - config.centerCalibrationPoint) <=
+                config.task3StartCenterGatePx) {
             centerReadyFrames = std::min(centerReadyFrames + 1, 1000);
         } else if (!armed) {
             centerReadyFrames = 0;
