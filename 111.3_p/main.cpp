@@ -162,9 +162,9 @@ ball_stepper::AppConfig makeUserConfig()
     // P保持柔和的0.060，D恢复0.030只增强速度阻尼，不增加静止起步推力。
     config.task3VelocityKdDegPerCmS = 0.0500;
 
-    // I只在最后2.5 cm且球速较低时介入。最大I输出为0.250*0.80=0.20 deg，
-    // 足够消除直管静差，同时比旧版0.40 deg柔和，目标反向时仍会清零。
-    config.task3IntegralKiDegPerCmSecond = 0.250;
+    // I在最终区域且球速较低时介入。日志确认0.25 deg顶满后仍无法克服
+    // 当前直管静摩擦，因此恢复0.40 deg最大积分权限；误差过零仍立即清零。
+    config.task3IntegralKiDegPerCmSecond = 0.400;
     config.task3IntegralZoneCm = 3.0;
     config.task3IntegralSpeedLimitCmS = 1.0;
     config.task3IntegralLimitCmSeconds = 1.0;
