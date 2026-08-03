@@ -106,9 +106,9 @@ ball_stepper::AppConfig makeUserConfig()
     config.exposureAbsolute = 15.0;
 
     // ---------------- 2. ROI和水管轴线 ----------------
-    // 只处理题目运动区附近的窄水管带。标定点为x=167、275、398，
-    // 左右各保留约40 px防止过冲；框外画面不进入霍夫圆和暗斑检测。
-    config.pipeDisplayArea = cv::Rect(125, 220, 315, 55);
+    // 覆盖画面中整根可见水管，同时保持为较窄的横向带状ROI。
+    // 框外的上下机构和线缆不进入霍夫圆及暗斑检测。
+    config.pipeDisplayArea = cv::Rect(0, 210, 565, 70);
     config.roi = config.pipeDisplayArea;
     config.drawPipeDetectionArea = true;
 
