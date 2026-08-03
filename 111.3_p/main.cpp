@@ -106,10 +106,11 @@ ball_stepper::AppConfig makeUserConfig()
     config.exposureAbsolute = 15.0;
 
     // ---------------- 2. ROI和水管轴线 ----------------
-    // 覆盖画面中整根可见水管，同时保持为较窄的横向带状ROI。
-    // 框外的上下机构和线缆不进入霍夫圆及暗斑检测。
+    // 黄色显示框覆盖整根可见水管。
     config.pipeDisplayArea = cv::Rect(0, 210, 565, 70);
-    config.roi = config.pipeDisplayArea;
+    // 实际算法只处理-5、O、+5及过冲余量所在的中间管段，避免把水管
+    // 两端的螺丝、接头和固定反光件当成钢球。
+    config.roi = cv::Rect(125, 220, 315, 55);
     config.drawPipeDetectionArea = true;
 
     // 摄像头目前看不到整根水管，因此先用第3题-5 cm和+5 cm两个实测点
