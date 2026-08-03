@@ -99,11 +99,11 @@ ball_stepper::AppConfig makeUserConfig()
     // 固定安装后关闭自动对焦，避免识别过程中镜头反复改变清晰度和钢球外观。
     config.disableAutofocus = true;
 
-    // 每次启动主动启用自动曝光，适应现场照明变化。驱动会自行调整曝光时间；
-    // exposureAbsolute在自动模式下不参与控制。
+    // 固定较低曝光，避免自动曝光把白管画面拉得过亮并产生明暗波动。
+    // 45通常对应约4.5 ms，仍短于120 FPS的一帧周期。
     config.configureExposure = true;
-    config.useManualExposure = false;
-    config.exposureAbsolute = 45.0;  // 如后续重开手动曝光，先从4.5 ms试起。
+    config.useManualExposure = true;
+    config.exposureAbsolute = 45.0;
 
     // ---------------- 2. ROI和水管轴线 ----------------
 // 黄框和实际识别ROI都覆盖整段可见水管；最新三个位置为x=167、275、398。
