@@ -154,22 +154,20 @@ ball_stepper::AppConfig makeUserConfig()
     config.task3TimeLimitMs = 5000;
 
     // ---------------- 4. 钢球 PDI 外环 ----------------
-    // angle = Kp(direction) * (position - target)
-    //       + Kd * two-frame velocity + Ki * I.
-    // Negative angle moves the ball right; positive angle moves it left. The
-    // measured linkage needs much more rightward authority, so the two P gains
-    // are intentionally different. These remain feedback gains, not fixed
-    // travel angles.
-    config.task3MoveRightPositionKpDegPerCm = 0.350;
-    config.task3MoveLeftPositionKpDegPerCm = 0.080;
-    config.task3VelocityKdDegPerCmS = 0.040;
+    // 直管左右机械条件接近，两侧使用完全相同的位置P增益。
+    // 5 cm误差对应0.60 deg，刚好到基础限幅；接近目标后按误差线性减小。
+    config.task3MoveRightPositionKpDegPerCm = 0.120;
+    config.task3MoveLeftPositionKpDegPerCm = 0.120;
 
-    // I opens only during the slower final 3 cm. Its maximum output is
-    // 0.400 * 1.00 = 0.400 deg and every target reversal clears it.
-    config.task3IntegralKiDegPerCmSecond = 0.400;
-    config.task3IntegralZoneCm = 3.00;
-    config.task3IntegralSpeedLimitCmS = 0.8;
-    config.task3IntegralLimitCmSeconds = 1.00;
+    // D仍使用x[n]与x[n-2]的速度。由0.040降到0.030，减少视觉噪声造成的抖动。
+    config.task3VelocityKdDegPerCmS = 0.030;
+
+    // I只在最后2.5 cm且球速较低时介入。最大I输出为0.250*0.80=0.20 deg，
+    // 足够消除直管静差，同时比旧版0.40 deg柔和，目标反向时仍会清零。
+    config.task3IntegralKiDegPerCmSecond = 0.250;
+    config.task3IntegralZoneCm = 2.50;
+    config.task3IntegralSpeedLimitCmS = 1.0;
+    config.task3IntegralLimitCmSeconds = 0.80;
 
     // Breakaway overlaps the final I window, avoiding the old 0.5-1.0 cm gap
     // where neither compensation was active. It decays as soon as motion is
@@ -177,14 +175,13 @@ ball_stepper::AppConfig makeUserConfig()
     config.task3BreakawayErrorCm = 0.35;
     config.task3BreakawaySpeedCmS = 0.35;
     config.task3BreakawayDelaySeconds = 0.08;
-    config.task3BreakawayRampDegPerSecond = 0.80;
-    config.task3MoveRightBreakawayMaximumAngleDeg = 0.11;
-    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.28;
+    config.task3BreakawayRampDegPerSecond = 0.40;
+    config.task3MoveRightBreakawayMaximumAngleDeg = 0.12;
+    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.12;
 
-    // Asymmetric PDI saturation. Rightward motion can reach -0.80 deg normally
-    // and -0.91 deg only when feedback confirms a stall. Leftward motion is
-    // limited to +0.60/+0.88 deg; the extra range is feedback-triggered only.
-    config.task3MoveRightOutputAngleLimitDeg = 0.80;
+    // 直管双向基础输出和脱困输出完全对称：正常最多+/-0.60 deg，
+    // 反馈确认卡滞后最多再叠加0.12 deg，但仍受总机械角度限幅保护。
+    config.task3MoveRightOutputAngleLimitDeg = 0.60;
     config.task3MoveLeftOutputAngleLimitDeg = 0.60;
 
     // v[n] = (x[n] - x[n-2]) / (t[n] - t[n-2]); low-pass only removes vision
@@ -193,7 +190,7 @@ ball_stepper::AppConfig makeUserConfig()
     config.speedFilterSeconds = 0.020;
 
     config.maximumPipeAngleDeg = 0.91;
-    config.angleSlewDegS = 8.0;
+    config.angleSlewDegS = 5.0;
 
     // ---------------- 5. 曲柄连杆尺寸 ----------------
     // 【必须实测】电机输出轴中心到实际使用曲柄孔中心的距离，不是圆盘直径。
