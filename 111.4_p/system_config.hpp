@@ -185,6 +185,9 @@ struct AppConfig {
     bool startArmed = false;
     bool gui = true;
     bool terminalKeys = true;
+    bool controlIpcEnabled = false;
+    bool controlIpcRequired = false;
+    uint16_t controlIpcPort = 0;
     bool csv = false;
     bool runtimeLogEnabled = true;
     std::string runtimeLogDirectory = "logs";
@@ -499,10 +502,20 @@ inline bool validateConfig(const AppConfig& config)
         std::fprintf(stderr, "invalid absolute encoder homing parameter\n");
         return false;
     }
-    if (!config.gui && !config.terminalKeys &&
+    if (!config.gui && !config.terminalKeys && !config.controlIpcEnabled &&
         config.motorEnabled && !config.startArmed) {
         std::fprintf(stderr,
-            "headless motor mode requires terminalKeys or startArmed=true\n");
+            "headless motor mode requires terminal keys, control IPC, "
+            "or startArmed=true\n");
+        return false;
+    }
+    if (config.controlIpcRequired && !config.controlIpcEnabled) {
+        std::fprintf(stderr,
+            "controlIpcRequired needs controlIpcEnabled=true\n");
+        return false;
+    }
+    if (config.controlIpcEnabled && config.controlIpcPort == 0) {
+        std::fprintf(stderr, "control IPC requires a listen port\n");
         return false;
     }
     if (config.runtimeLogEnabled && config.runtimeLogDirectory.empty()) {

@@ -72,6 +72,73 @@ void testLittleEndianAndFlags()
     assert(decoded.originSet());
 }
 
+void testQuestionModeMapping()
+{
+    Frame frame;
+    assert(makeFrame(
+        Event::Select, 3, State::Ready, 1, 0, frame) == DecodeError::None);
+    assert(frame.mode == Mode::UartTask);
+
+    assert(makeFrame(
+        Event::Select, 5, State::Ready, 2, 0, frame) == DecodeError::None);
+    assert(frame.mode == Mode::TrackingPid);
+}
+
+void testPublishedTelemetryExample()
+{
+    const std::array<uint8_t, kTelemetryFrameSize> bytes = {
+        0xA5, 0x5A, 0x01, 0x1C, 0x10, 0x04, 0x02, 0x03,
+        0x04, 0x00, 0x48, 0x00, 0x4B, 0x00, 0x50, 0x00,
+        0x50, 0x00, 0xE0, 0x2E, 0x00, 0x00, 0x40, 0x1F,
+        0x00, 0x00, 0x00, 0x61
+    };
+
+    TelemetryFrame frame;
+    assert(decodeTelemetryFrame(bytes.data(), bytes.size(), frame) ==
+           DecodeError::None);
+    assert(frame.question == 4);
+    assert(frame.state == State::Running);
+    assert(frame.flags == 0x03);
+    assert(frame.sequence == 4);
+    assert(frame.leftSpeed50ms == 72);
+    assert(frame.rightSpeed50ms == 75);
+    assert(frame.leftTarget50ms == 80);
+    assert(frame.rightTarget50ms == 80);
+    assert(frame.distanceSteps == 12000);
+    assert(frame.elapsedMs == 8000);
+
+    std::array<uint8_t, kTelemetryFrameSize> encoded{};
+    assert(encodeTelemetryFrame(frame, encoded) == DecodeError::None);
+    assert(encoded == bytes);
+}
+
+void testTelemetrySignedValues()
+{
+    TelemetryFrame frame;
+    frame.question = 5;
+    frame.state = State::Sent;
+    frame.flags = kFlagOriginSet;
+    frame.sequence = 0x1234;
+    frame.leftSpeed50ms = -123;
+    frame.rightSpeed50ms = 456;
+    frame.leftTarget50ms = -80;
+    frame.rightTarget50ms = 80;
+    frame.distanceSteps = 50000;
+    frame.elapsedMs = 0x89ABCDEFu;
+
+    std::array<uint8_t, kTelemetryFrameSize> bytes{};
+    assert(encodeTelemetryFrame(frame, bytes) == DecodeError::None);
+    TelemetryFrame decoded;
+    assert(decodeTelemetryFrame(bytes.data(), bytes.size(), decoded) ==
+           DecodeError::None);
+    assert(decoded.leftSpeed50ms == -123);
+    assert(decoded.rightSpeed50ms == 456);
+    assert(decoded.leftTarget50ms == -80);
+    assert(decoded.rightTarget50ms == 80);
+    assert(decoded.distanceSteps == 50000);
+    assert(decoded.elapsedMs == 0x89ABCDEFu);
+}
+
 void testValidation()
 {
     Frame frame;
@@ -168,6 +235,66 @@ void testSequenceTrackingAndWrap()
     }
     assert(parser.stats().duplicateSequences == 1);
     assert(parser.stats().sequenceDiscontinuities == 1);
+}
+
+void testMixedEventTelemetryStreamWithCrlf()
+{
+    Frame firstEvent;
+    Frame secondEvent;
+    assert(makeFrame(
+        Event::Select, 4, State::Ready, 3, kFlagOriginSet, firstEvent) ==
+        DecodeError::None);
+    assert(makeFrame(
+        Event::MotorToggle, 4, State::Sent, 5, kFlagOriginSet, secondEvent) ==
+        DecodeError::None);
+
+    TelemetryFrame telemetry;
+    telemetry.question = 4;
+    telemetry.state = State::Running;
+    telemetry.flags = kFlagPidEnabled | kFlagMotorEnabled | kFlagOriginSet;
+    telemetry.sequence = 4;
+    telemetry.leftSpeed50ms = 72;
+    telemetry.rightSpeed50ms = 75;
+    telemetry.leftTarget50ms = 80;
+    telemetry.rightTarget50ms = 80;
+    telemetry.distanceSteps = 12000;
+    telemetry.elapsedMs = 8000;
+
+    const auto firstBytes = encodeChecked(firstEvent);
+    const auto secondBytes = encodeChecked(secondEvent);
+    std::array<uint8_t, kTelemetryFrameSize> telemetryBytes{};
+    assert(encodeTelemetryFrame(telemetry, telemetryBytes) ==
+           DecodeError::None);
+
+    std::vector<uint8_t> wire;
+    auto appendPacket = [&](const auto& packet) {
+        wire.insert(wire.end(), packet.begin(), packet.end());
+        wire.push_back(kCrlf0);
+        wire.push_back(kCrlf1);
+    };
+    appendPacket(firstBytes);
+    appendPacket(telemetryBytes);
+    appendPacket(secondBytes);
+
+    StreamParser parser;
+    ParsedBatch batch;
+    for (std::size_t offset = 0; offset < wire.size(); offset += 7) {
+        const std::size_t count = std::min<std::size_t>(7, wire.size() - offset);
+        ParsedBatch part = parser.pushAll(wire.data() + offset, count);
+        batch.events.insert(
+            batch.events.end(), part.events.begin(), part.events.end());
+        batch.telemetry.insert(
+            batch.telemetry.end(), part.telemetry.begin(),
+            part.telemetry.end());
+    }
+
+    assert(batch.events.size() == 2);
+    assert(batch.telemetry.size() == 1);
+    assert(batch.telemetry[0].distanceSteps == 12000);
+    assert(parser.stats().framesAccepted == 3);
+    assert(parser.stats().eventFramesAccepted == 2);
+    assert(parser.stats().telemetryFramesAccepted == 1);
+    assert(parser.stats().sequenceDiscontinuities == 0);
 }
 
 class RecordingEventHandler final : public EventHandler {
@@ -313,7 +440,7 @@ void testLinuxFullDuplexUart()
     assert(sent.sequence == 0xFFFF);
     assert(uart.nextTransmitSequence() == 0);
 
-    std::array<uint8_t, kFrameSize> transmitted{};
+    std::array<uint8_t, kFrameSize + 2> transmitted{};
     std::size_t used = 0;
     for (int attempt = 0; attempt < 50 && used < transmitted.size(); ++attempt) {
         const ssize_t count = ::read(
@@ -329,7 +456,9 @@ void testLinuxFullDuplexUart()
     assert(used == transmitted.size());
 
     Frame decoded;
-    assert(decodeFrame(transmitted.data(), transmitted.size(), decoded) ==
+    assert(transmitted[kFrameSize] == kCrlf0);
+    assert(transmitted[kFrameSize + 1] == kCrlf1);
+    assert(decodeFrame(transmitted.data(), kFrameSize, decoded) ==
            DecodeError::None);
     assert(decoded.event == Event::MotorToggle);
     assert(decoded.question == 4);
@@ -348,9 +477,13 @@ int main()
 {
     testPublishedExample();
     testLittleEndianAndFlags();
+    testQuestionModeMapping();
+    testPublishedTelemetryExample();
+    testTelemetrySignedValues();
     testValidation();
     testStreamingAndResynchronization();
     testSequenceTrackingAndWrap();
+    testMixedEventTelemetryStreamWithCrlf();
     testFunctionalDispatch();
 #if defined(__linux__)
     testLinuxFullDuplexUart();

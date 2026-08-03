@@ -1,5 +1,21 @@
 #pragma once
 
+#ifndef BALL_TASK_LABEL
+#define BALL_TASK_LABEL "TASK4"
+#endif
+
+#ifndef BALL_TASK_PREVIEW_NAME
+#define BALL_TASK_PREVIEW_NAME "ball2-task4-velocity"
+#endif
+
+#ifndef BALL_TASK_LOG_EVENT
+#define BALL_TASK_LOG_EVENT "task4_balance"
+#endif
+
+#ifndef BALL_TASK_QUESTION_NUMBER
+#define BALL_TASK_QUESTION_NUMBER 4
+#endif
+
 // task4_app.hpp
 // ============================================================================
 // 第4问完整主循环：高速摄像头 -> 钢球位置/速度外环 -> 目标水管角度
@@ -15,6 +31,7 @@
 #include "terminal_key_input.hpp"
 #include "udp_video_streamer.hpp"
 #include "zdt_stepper_uart.hpp"
+#include "contest_control_ipc.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -23,14 +40,85 @@
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace ball_stepper {
+
+class Task4ControlInbox final :
+    public contest_control::EventHandler,
+    public contest_control::TelemetryHandler,
+    public VehicleEncoderSource {
+    std::vector<contest_control::Frame> pendingEvents_;
+    std::deque<VehicleEncoderSample> encoderSamples_;
+
+    bool pushEvent(const contest_control::Frame& frame)
+    {
+        if (frame.question != BALL_TASK_QUESTION_NUMBER) return false;
+        pendingEvents_.push_back(frame);
+        return true;
+    }
+
+public:
+    bool selectQuestion(const contest_control::Frame& frame) override
+    {
+        return pushEvent(frame);
+    }
+    bool executeQuestion(const contest_control::Frame& frame) override
+    {
+        return pushEvent(frame);
+    }
+    bool setMotorEnabled(
+        bool, const contest_control::Frame& frame) override
+    {
+        return pushEvent(frame);
+    }
+    bool returnToOrigin(const contest_control::Frame& frame) override
+    {
+        return pushEvent(frame);
+    }
+    bool setCurrentPositionAsOrigin(
+        const contest_control::Frame& frame) override
+    {
+        return pushEvent(frame);
+    }
+
+    bool handleTelemetry(
+        const contest_control::TelemetryFrame& frame) override
+    {
+        if (frame.question != BALL_TASK_QUESTION_NUMBER) return false;
+        VehicleEncoderSample sample;
+        sample.speedUnits =
+            (static_cast<double>(frame.leftSpeed50ms) +
+             static_cast<double>(frame.rightSpeed50ms)) * 0.5;
+        sample.sampleTime = secondsNow();
+        sample.sequence = frame.sequence;
+        encoderSamples_.push_back(sample);
+        while (encoderSamples_.size() > 64) encoderSamples_.pop_front();
+        return true;
+    }
+
+    bool poll(VehicleEncoderSample& sample) override
+    {
+        if (encoderSamples_.empty()) return false;
+        sample = encoderSamples_.front();
+        encoderSamples_.pop_front();
+        return true;
+    }
+
+    std::vector<contest_control::Frame> takeEvents()
+    {
+        std::vector<contest_control::Frame> events;
+        events.swap(pendingEvents_);
+        return events;
+    }
+};
 
 inline bool validateTask4Config(const AppConfig& config)
 {
@@ -93,7 +181,8 @@ inline bool validateTask4Config(const AppConfig& config)
             config.task4DriveAngleLimitDeg ||
         config.task4VehicleInputTimeoutMs < 1 ||
         config.task4VehicleSampleMaximumGapMs < 2) {
-        std::fprintf(stderr, "invalid TASK 4 balance parameter in main.cpp\n");
+        std::fprintf(stderr,
+            "invalid " BALL_TASK_LABEL " balance parameter in main.cpp\n");
         return false;
     }
 
@@ -171,7 +260,7 @@ inline Task4LogPaths makeTask4LogPaths(const AppConfig& config)
         event.push_back(std::isalnum(character) || character == '_' ||
                         character == '-' ? static_cast<char>(character) : '_');
     }
-    if (event.empty()) event = "task4_balance";
+    if (event.empty()) event = BALL_TASK_LOG_EVENT;
 
     const auto now = std::chrono::system_clock::now();
     const auto milliseconds = std::chrono::duration_cast<
@@ -217,7 +306,8 @@ public:
         if (!textPath_.empty()) textFile_ = std::fopen(textPath_.c_str(), "w");
         if (!csvPath_.empty()) csvFile_ = std::fopen(csvPath_.c_str(), "w");
         if (!textFile_ || !csvFile_) {
-            std::fprintf(stderr, "WARNING: cannot create TASK4 runtime logs\n");
+            std::fprintf(stderr,
+                "WARNING: cannot create " BALL_TASK_LABEL " runtime logs\n");
         }
         if (csvFile_) {
             std::fputs(
@@ -337,7 +427,7 @@ inline int runTask4VelocityApp(
         config.motorCommandHz, config.motorRpm, config.motorSpeedSlopeRpmS,
         config.task4Kp, config.task4Kd, config.task4Ki,
         config.task4DriveAngleLimitDeg, config.task4BrakeAngleLimitDeg,
-        vehicleEncoderSource ? 1 : 0,
+        (config.controlIpcEnabled || vehicleEncoderSource != nullptr) ? 1 : 0,
         config.task4VehicleAccelerationFeedforwardMap.size(),
         config.task4VehicleBrakingFeedforwardMap.size(),
         config.task4VehicleFeedforwardInterpolate ? 1 : 0,
@@ -433,12 +523,39 @@ inline int runTask4VelocityApp(
             std::fprintf(stderr,
                 "terminal keys ready: SPACE=start/abort, F=finish, "
                 "R=reset, Q=exit\n");
-        } else if (!config.gui && config.motorEnabled && !config.startArmed) {
+        } else if (!config.gui && config.motorEnabled && !config.startArmed &&
+                   !config.controlIpcEnabled) {
             std::fprintf(stderr,
                 "headless paused mode needs an interactive terminal for keys\n");
             return 1;
         }
     }
+
+    Task4ControlInbox controlInbox;
+    contest_control::UdpFrameReceiver controlIpc;
+    bool controlIpcActive = false;
+    if (config.controlIpcEnabled) {
+        if (controlIpc.openPort(config.controlIpcPort)) {
+            controlIpcActive = true;
+            std::fprintf(stderr,
+                BALL_TASK_LABEL " control IPC ready: 127.0.0.1:%u\n",
+                static_cast<unsigned>(config.controlIpcPort));
+            diagnostics.write(
+                "CONTROL_IPC ready port=%u",
+                static_cast<unsigned>(config.controlIpcPort));
+        } else {
+            std::fprintf(stderr,
+                BALL_TASK_LABEL " control IPC open failed: %s\n",
+                controlIpc.lastError().c_str());
+            diagnostics.write(
+                "ERROR control IPC open failed: %s",
+                controlIpc.lastError().c_str());
+            if (config.controlIpcRequired) return 1;
+        }
+    }
+    VehicleEncoderSource* activeVehicleEncoderSource =
+        controlIpcActive ? static_cast<VehicleEncoderSource*>(&controlInbox) :
+                           vehicleEncoderSource;
 
     // ---------------- ZDT启动 ----------------
     SerialPort serial;
@@ -580,7 +697,7 @@ inline int runTask4VelocityApp(
     Task4BalanceController controller(config);
     VehicleMotionFeedforward vehicleFeedforward(config);
     const MechanismModel mechanism(config);
-    PreviewWindow preview("ball2-task4-velocity");
+    PreviewWindow preview(BALL_TASK_PREVIEW_NAME);
     if (config.gui) preview.start();
 
     if (config.csv) {
@@ -631,17 +748,77 @@ inline int runTask4VelocityApp(
     double nextVehicleStatusTime = secondsNow();
     double nextPausedStatusTime = secondsNow();
     bool videoStreamFailureReported = false;
+    bool chassisMotorEnabled = false;
+    bool haveControlSequence = false;
+    uint16_t lastControlSequence = 0;
     int controlFrames = 0;
     double controlFps = 0.0;
     double fpsStart = secondsNow();
 
+    auto pauseTask4FromControl = [&](const char* reason) {
+        armed = false;
+        requestedAngleDeg = 0.0;
+        controlOutput = {};
+        controller.reset();
+        estimator.reset();
+        vehicleFeedforward.reset(secondsNow());
+        readyFrames = 0;
+        hadMeasurement = false;
+        lastMeasurementTime = -1.0;
+        speedCmS = 0.0;
+        rawTwoFrameSpeedCmS = 0.0;
+        diagnostics.write(
+            "CONTROL_IPC " BALL_TASK_LABEL " paused reason=%s", reason);
+    };
+
+    auto returnOriginFromControl = [&]() {
+        pauseTask4FromControl("return origin");
+        requestedAngleDeg = 0.0;
+        appliedAngleDeg = 0.0;
+        motorSteps = 0;
+        if (!motor || !commander) {
+            diagnostics.write("CONTROL_IPC dry-run return origin");
+            return true;
+        }
+        bool ok = commander->returnToZero(config.exitReturnTimeoutMs);
+        if (!motor->stop()) ok = false;
+        if (ok) {
+            motorTelemetry = commander->telemetry();
+            std::fprintf(stderr,
+                BALL_TASK_LABEL " returned pipe to origin\n");
+            diagnostics.write("CONTROL_IPC return origin completed");
+        }
+        return ok;
+    };
+
+    auto setOriginFromControl = [&]() {
+        pauseTask4FromControl("set origin");
+        requestedAngleDeg = 0.0;
+        appliedAngleDeg = 0.0;
+        motorSteps = 0;
+        if (!motor) {
+            diagnostics.write("CONTROL_IPC dry-run set origin");
+            return true;
+        }
+        if (!motor->stop() || !motor->setSingleTurnOrigin(true)) return false;
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(config.zeroSettleMs));
+        if (!motor->clearPosition()) return false;
+        if (commander && !commander->force(0)) return false;
+        if (commander) motorTelemetry = commander->telemetry();
+        std::fprintf(stderr,
+            BALL_TASK_LABEL " stored current pipe position as origin\n");
+        diagnostics.write("CONTROL_IPC set origin completed");
+        return true;
+    };
+
     if (armed) {
         std::fprintf(stderr,
-            "TASK4 AUTO BALANCE active: control starts on first ball "
+            BALL_TASK_LABEL " AUTO BALANCE active: control starts on first ball "
             "measurement; SPACE=abort, F=finish, Q/ESC=exit\n");
     } else {
         std::fprintf(stderr,
-            "TASK4 PAUSED: put ball at O; SPACE=start/abort, F=finish, "
+            BALL_TASK_LABEL " PAUSED: put ball at O; SPACE=start/abort, F=finish, "
             "R=reset vision, Q/ESC=exit\n");
     }
 
@@ -653,10 +830,120 @@ inline int runTask4VelocityApp(
             now - previousLoopTime, 0.002, 0.05);
         previousLoopTime = now;
 
-        if (vehicleEncoderSource) {
+        bool serialExecuteRequested = false;
+        bool serialFinishRequested = false;
+        bool controlActionFailed = false;
+        if (controlIpcActive) {
+            std::size_t dispatchedEvents = 0;
+            std::size_t dispatchedTelemetry = 0;
+            if (!controlIpc.receiveAndDispatch(
+                    controlInbox, &dispatchedEvents,
+                    &controlInbox, &dispatchedTelemetry)) {
+                std::fprintf(stderr,
+                    BALL_TASK_LABEL " control IPC failed: %s\n",
+                    controlIpc.lastError().c_str());
+                diagnostics.write(
+                    "ERROR control IPC receive/dispatch failed: %s",
+                    controlIpc.lastError().c_str());
+                communicationOk = false;
+                break;
+            }
+        }
+
+        for (const contest_control::Frame& controlFrame :
+             controlInbox.takeEvents()) {
+            if (haveControlSequence) {
+                const uint16_t forward = static_cast<uint16_t>(
+                    controlFrame.sequence - lastControlSequence);
+                if (forward == 0) {
+                    diagnostics.write(
+                        "CONTROL_IPC duplicate sequence=%u ignored",
+                        static_cast<unsigned>(controlFrame.sequence));
+                    continue;
+                }
+                if (forward > 0x8000u) {
+                    const bool controllerRestart =
+                        controlFrame.event == contest_control::Event::Select &&
+                        controlFrame.state == contest_control::State::Ready;
+                    if (!controllerRestart) {
+                        diagnostics.write(
+                            "CONTROL_IPC stale sequence=%u last=%u ignored",
+                            static_cast<unsigned>(controlFrame.sequence),
+                            static_cast<unsigned>(lastControlSequence));
+                        continue;
+                    }
+                }
+            }
+            haveControlSequence = true;
+            lastControlSequence = controlFrame.sequence;
+
+            diagnostics.write(
+                "CONTROL_IPC RX event=%s state=%s sequence=%u flags=0x%02X",
+                contest_control::eventName(controlFrame.event),
+                contest_control::stateName(controlFrame.state),
+                static_cast<unsigned>(controlFrame.sequence),
+                static_cast<unsigned>(controlFrame.flags));
+
+            switch (controlFrame.event) {
+            case contest_control::Event::Select:
+                pauseTask4FromControl("question selected");
+                chassisMotorEnabled = controlFrame.motorEnabled();
+                break;
+
+            case contest_control::Event::Execute:
+                if (controlFrame.state != contest_control::State::Running) {
+                    diagnostics.write(
+                        "CONTROL_IPC " BALL_TASK_LABEL
+                        " EXECUTE rejected state=%s",
+                        contest_control::stateName(controlFrame.state));
+                } else if (armed) {
+                    diagnostics.write(
+                        "CONTROL_IPC " BALL_TASK_LABEL
+                        " EXECUTE ignored; already running");
+                } else {
+                    chassisMotorEnabled = controlFrame.motorEnabled();
+                    serialExecuteRequested = true;
+                }
+                break;
+
+            case contest_control::Event::MotorToggle:
+                chassisMotorEnabled = controlFrame.motorEnabled();
+                diagnostics.write(
+                    "CONTROL_IPC chassis_motor_enabled=%d",
+                    chassisMotorEnabled ? 1 : 0);
+                if (!chassisMotorEnabled &&
+                    controlFrame.state == contest_control::State::Sent) {
+                    serialFinishRequested = true;
+                }
+                break;
+
+            case contest_control::Event::ReturnOrigin:
+                if (!returnOriginFromControl()) controlActionFailed = true;
+                break;
+
+            case contest_control::Event::SetOrigin:
+                if (!controlFrame.originSet()) {
+                    diagnostics.write(
+                        "CONTROL_IPC SET_ORIGIN rejected: flag is 0");
+                } else {
+                    if (!setOriginFromControl()) controlActionFailed = true;
+                }
+                break;
+            }
+            if (controlActionFailed) break;
+        }
+        if (controlActionFailed) {
+            std::fprintf(stderr,
+                BALL_TASK_LABEL
+                " control action failed; stopping safely\n");
+            communicationOk = false;
+            break;
+        }
+
+        if (activeVehicleEncoderSource) {
             VehicleEncoderSample sample;
             for (int sampleCount = 0; sampleCount < 32; ++sampleCount) {
-                if (!vehicleEncoderSource->poll(sample)) break;
+                if (!activeVehicleEncoderSource->poll(sample)) break;
                 vehicleFeedforward.submitEncoderSample(sample);
             }
         }
@@ -771,8 +1058,9 @@ inline int runTask4VelocityApp(
                 maximumAbsErrorCm <= config.task4AllowedErrorCm &&
                 !lossFailure;
             std::fprintf(stderr,
-                "TASK4 8s CHECK: %s, max_error=%.3f cm, "
+                BALL_TASK_LABEL " %.0fs CHECK: %s, max_error=%.3f cm, "
                 "longest_lost=%.0f ms\n",
+                config.task4EvaluationSeconds,
                 evaluationPassed ? "PASS" : "FAIL",
                 maximumAbsErrorCm, longestLostMs);
             diagnostics.write(
@@ -797,7 +1085,7 @@ inline int runTask4VelocityApp(
                 "raw_v=%+.2f filt_v=%+.2f raw_a=%+.1f filt_a=%+.1f "
                 "dir=%+d segment=%d map_input=%.1f mapped=%.3fdeg "
                 "ff_raw=%+.3fdeg ff=%+.3fdeg request=%+.3fdeg",
-                vehicleEncoderSource ? 1 : 0,
+                activeVehicleEncoderSource ? 1 : 0,
                 vehicleMotion.signalFresh ? 1 : 0,
                 vehicleMotion.sampleAgeMs,
                 vehicleMotion.rawSpeedUnits,
@@ -830,7 +1118,7 @@ inline int runTask4VelocityApp(
                 config.task4StartToleranceCm, speedCmS,
                 config.task4StartSpeedCmS, readyFrames,
                 config.task4StartConfirmFrames,
-                vehicleEncoderSource ? 1 : 0,
+                activeVehicleEncoderSource ? 1 : 0,
                 vehicleMotion.signalFresh ? 1 : 0,
                 vehicleMotion.filteredSpeedUnits,
                 vehicleMotion.filteredAccelerationUnitsS,
@@ -876,6 +1164,8 @@ inline int runTask4VelocityApp(
         if (key < 0 && config.terminalKeys) {
             key = terminalKeys.consumeKey();
         }
+        if (serialExecuteRequested) key = ' ';
+        if (serialFinishRequested) key = 'f';
 
         const bool previewRequested =
             config.gui &&
@@ -953,11 +1243,11 @@ inline int runTask4VelocityApp(
                     readyFrames < config.task4StartConfirmFrames ?
                         "CONFIRMING" : "READY - PRESS SPACE";
                 std::snprintf(line, sizeof(line),
-                    "TASK4 %s ready=%d/%d",
+                    BALL_TASK_LABEL " %s ready=%d/%d",
                     waitText, readyFrames, config.task4StartConfirmFrames);
             } else {
                 std::snprintf(line, sizeof(line),
-                    "TASK4 %s time=%.2fs",
+                    BALL_TASK_LABEL " %s time=%.2fs",
                     evaluationFinished ?
                         (evaluationPassed ? "PASS/HOLD" : "FAIL/HOLD") :
                         "BALANCE",
@@ -996,7 +1286,7 @@ inline int runTask4VelocityApp(
 
             std::snprintf(line, sizeof(line),
                 "CAR src=%d fresh=%d v=%+.1f a=%+.1f seg=%d map=%.3f",
-                vehicleEncoderSource ? 1 : 0,
+                activeVehicleEncoderSource ? 1 : 0,
                 vehicleMotion.signalFresh ? 1 : 0,
                 vehicleMotion.filteredSpeedUnits,
                 vehicleMotion.filteredAccelerationUnitsS,
@@ -1056,11 +1346,13 @@ inline int runTask4VelocityApp(
                 estimator.reset();
                 readyFrames = 0;
                 std::fprintf(stderr,
-                    "TASK4 aborted; PAUSED; pipe returning to level\n");
+                    BALL_TASK_LABEL
+                    " aborted; PAUSED; pipe returning to level\n");
             } else if (!measuredNow ||
                        readyFrames < config.task4StartConfirmFrames) {
                 std::fprintf(stderr,
-                    "TASK4 start refused: measured=%d error=%+.3fcm "
+                    BALL_TASK_LABEL
+                    " start refused: measured=%d error=%+.3fcm "
                     "allowed=+/-%.3fcm speed=%+.3fcm/s limit=%.3f "
                     "ready=%d/%d\n",
                     measuredNow ? 1 : 0, errorCm,
@@ -1081,7 +1373,8 @@ inline int runTask4VelocityApp(
                 lastMeasurementTime = now;
                 lastMeasuredFeedbackAngleDeg = 0.0;
                 std::fprintf(stderr,
-                    "TASK4 BALANCE started; start the car now\n");
+                    BALL_TASK_LABEL
+                    " BALANCE started; start the car now\n");
             }
         }
 
@@ -1095,7 +1388,8 @@ inline int runTask4VelocityApp(
                 maximumAbsErrorCm <= config.task4AllowedErrorCm &&
                 !lossFailure;
             std::fprintf(stderr,
-                "TASK4 manual finish: %s time=%.3fs max_error=%.3fcm\n",
+                BALL_TASK_LABEL
+                " manual finish: %s time=%.3fs max_error=%.3fcm\n",
                 evaluationPassed ? "PASS" : "FAIL",
                 elapsed, maximumAbsErrorCm);
         }
@@ -1146,6 +1440,15 @@ inline int runTask4VelocityApp(
 
     preview.stop();
     terminalKeys.stop();
+    if (controlIpcActive) {
+        diagnostics.write(
+            "CONTROL_IPC stats frames=%llu telemetry=%llu rejected=%llu",
+            static_cast<unsigned long long>(controlIpc.acceptedFrames()),
+            static_cast<unsigned long long>(
+                controlIpc.acceptedTelemetryFrames()),
+            static_cast<unsigned long long>(controlIpc.rejectedDatagrams()));
+        controlIpc.closeSocket();
+    }
     if (videoStreamer) {
         const uint64_t sentFrames = videoStreamer->sentFrames();
         videoStreamer->stop();
@@ -1156,7 +1459,8 @@ inline int runTask4VelocityApp(
     if (!config.motorEnabled) {
         std::fprintf(stderr, "DRY-RUN finished; no ZDT command was sent\n");
     } else {
-        std::fprintf(stderr, "TASK4 ZDT velocity control finished\n");
+        std::fprintf(stderr,
+            BALL_TASK_LABEL " ZDT velocity control finished\n");
     }
     return communicationOk ? 0 : 1;
 }

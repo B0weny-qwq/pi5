@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -20,10 +22,15 @@
 namespace contest_control {
 
 inline constexpr std::size_t kFrameSize = 12;
+inline constexpr std::size_t kTelemetryFrameSize = 28;
 inline constexpr uint8_t kSof0 = 0xA5;
 inline constexpr uint8_t kSof1 = 0x5A;
 inline constexpr uint8_t kVersion = 0x01;
 inline constexpr uint8_t kWireSize = 0x0C;
+inline constexpr uint8_t kTelemetryWireSize = 0x1C;
+inline constexpr uint8_t kTelemetryType = 0x10;
+inline constexpr uint8_t kCrlf0 = 0x0D;
+inline constexpr uint8_t kCrlf1 = 0x0A;
 inline constexpr int kBaud = 230400;
 
 inline constexpr uint8_t kFlagPidEnabled = 0x01;
@@ -63,7 +70,11 @@ enum class DecodeError {
     EventNotAllowedForQuestion,
     QuestionModeMismatch,
     InvalidState,
-    ReservedFlagsSet
+    ReservedFlagsSet,
+    UnsupportedTelemetryType,
+    InvalidTelemetryQuestion,
+    InvalidTelemetryState,
+    NonzeroTelemetryReserved
 };
 
 struct Frame {
@@ -73,6 +84,23 @@ struct Frame {
     State state = State::Ready;
     uint16_t sequence = 0;
     uint8_t flags = 0;
+
+    bool pidEnabled() const { return (flags & kFlagPidEnabled) != 0; }
+    bool motorEnabled() const { return (flags & kFlagMotorEnabled) != 0; }
+    bool originSet() const { return (flags & kFlagOriginSet) != 0; }
+};
+
+struct TelemetryFrame {
+    uint8_t question = 4;
+    State state = State::Sent;
+    uint8_t flags = 0;
+    uint16_t sequence = 0;
+    int16_t leftSpeed50ms = 0;
+    int16_t rightSpeed50ms = 0;
+    int16_t leftTarget50ms = 0;
+    int16_t rightTarget50ms = 0;
+    uint32_t distanceSteps = 0;
+    uint32_t elapsedMs = 0;
 
     bool pidEnabled() const { return (flags & kFlagPidEnabled) != 0; }
     bool motorEnabled() const { return (flags & kFlagMotorEnabled) != 0; }
@@ -117,6 +145,14 @@ inline const char* decodeErrorName(DecodeError error)
     case DecodeError::QuestionModeMismatch: return "question/mode mismatch";
     case DecodeError::InvalidState: return "invalid state";
     case DecodeError::ReservedFlagsSet: return "reserved flags set";
+    case DecodeError::UnsupportedTelemetryType:
+        return "unsupported telemetry type";
+    case DecodeError::InvalidTelemetryQuestion:
+        return "invalid telemetry question";
+    case DecodeError::InvalidTelemetryState:
+        return "invalid telemetry state";
+    case DecodeError::NonzeroTelemetryReserved:
+        return "telemetry reserved byte is not zero";
     }
     return "unknown error";
 }
@@ -126,11 +162,11 @@ inline bool modeForQuestion(uint8_t question, Mode& mode)
     switch (question) {
     case 1:
     case 3:
-    case 5:
         mode = Mode::UartTask;
         return true;
     case 2:
     case 4:
+    case 5:
         mode = Mode::TrackingPid;
         return true;
     default:
@@ -161,6 +197,42 @@ inline uint8_t xorChecksum(const uint8_t* data, std::size_t size)
     uint8_t checksum = 0;
     for (std::size_t index = 0; index < size; ++index) checksum ^= data[index];
     return checksum;
+}
+
+inline uint16_t readUint16Le(const uint8_t* bytes)
+{
+    return static_cast<uint16_t>(bytes[0]) |
+        (static_cast<uint16_t>(bytes[1]) << 8);
+}
+
+inline int16_t readInt16Le(const uint8_t* bytes)
+{
+    const uint16_t raw = readUint16Le(bytes);
+    const int32_t signedValue = (raw & 0x8000u) != 0 ?
+        static_cast<int32_t>(raw) - 0x10000 : static_cast<int32_t>(raw);
+    return static_cast<int16_t>(signedValue);
+}
+
+inline uint32_t readUint32Le(const uint8_t* bytes)
+{
+    return static_cast<uint32_t>(bytes[0]) |
+        (static_cast<uint32_t>(bytes[1]) << 8) |
+        (static_cast<uint32_t>(bytes[2]) << 16) |
+        (static_cast<uint32_t>(bytes[3]) << 24);
+}
+
+inline void writeUint16Le(uint8_t* bytes, uint16_t value)
+{
+    bytes[0] = static_cast<uint8_t>(value & 0xFFu);
+    bytes[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+}
+
+inline void writeUint32Le(uint8_t* bytes, uint32_t value)
+{
+    bytes[0] = static_cast<uint8_t>(value & 0xFFu);
+    bytes[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+    bytes[2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
+    bytes[3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
 }
 
 inline DecodeError validateFrame(const Frame& frame)
@@ -215,6 +287,60 @@ inline DecodeError decodeFrame(
     return DecodeError::None;
 }
 
+inline DecodeError validateTelemetryFrame(const TelemetryFrame& frame)
+{
+    if (frame.question != 4 && frame.question != 5) {
+        return DecodeError::InvalidTelemetryQuestion;
+    }
+    if (frame.state != State::Sent && frame.state != State::Running) {
+        return DecodeError::InvalidTelemetryState;
+    }
+    if ((frame.flags & static_cast<uint8_t>(~kKnownFlags)) != 0) {
+        return DecodeError::ReservedFlagsSet;
+    }
+    return DecodeError::None;
+}
+
+inline DecodeError decodeTelemetryFrame(
+    const uint8_t* bytes, std::size_t size, TelemetryFrame& frame)
+{
+    if (bytes == nullptr || size != kTelemetryFrameSize) {
+        return DecodeError::WrongLength;
+    }
+    if (bytes[0] != kSof0 || bytes[1] != kSof1) {
+        return DecodeError::WrongHeader;
+    }
+    if (bytes[2] != kVersion) return DecodeError::UnsupportedVersion;
+    if (bytes[3] != kTelemetryWireSize) {
+        return DecodeError::WrongDeclaredSize;
+    }
+    if (bytes[4] != kTelemetryType) {
+        return DecodeError::UnsupportedTelemetryType;
+    }
+    if (xorChecksum(bytes, kTelemetryFrameSize - 1) !=
+        bytes[kTelemetryFrameSize - 1]) {
+        return DecodeError::ChecksumMismatch;
+    }
+    if (bytes[26] != 0) return DecodeError::NonzeroTelemetryReserved;
+
+    TelemetryFrame decoded;
+    decoded.question = bytes[5];
+    decoded.state = static_cast<State>(bytes[6]);
+    decoded.flags = bytes[7];
+    decoded.sequence = readUint16Le(bytes + 8);
+    decoded.leftSpeed50ms = readInt16Le(bytes + 10);
+    decoded.rightSpeed50ms = readInt16Le(bytes + 12);
+    decoded.leftTarget50ms = readInt16Le(bytes + 14);
+    decoded.rightTarget50ms = readInt16Le(bytes + 16);
+    decoded.distanceSteps = readUint32Le(bytes + 18);
+    decoded.elapsedMs = readUint32Le(bytes + 22);
+
+    const DecodeError error = validateTelemetryFrame(decoded);
+    if (error != DecodeError::None) return error;
+    frame = decoded;
+    return DecodeError::None;
+}
+
 inline DecodeError encodeFrame(
     const Frame& frame, std::array<uint8_t, kFrameSize>& bytes)
 {
@@ -230,6 +356,38 @@ inline DecodeError encodeFrame(
         frame.flags, 0
     };
     bytes.back() = xorChecksum(bytes.data(), bytes.size() - 1);
+    return DecodeError::None;
+}
+
+inline DecodeError encodeTelemetryFrame(
+    const TelemetryFrame& frame,
+    std::array<uint8_t, kTelemetryFrameSize>& bytes)
+{
+    const DecodeError error = validateTelemetryFrame(frame);
+    if (error != DecodeError::None) return error;
+
+    bytes.fill(0);
+    bytes[0] = kSof0;
+    bytes[1] = kSof1;
+    bytes[2] = kVersion;
+    bytes[3] = kTelemetryWireSize;
+    bytes[4] = kTelemetryType;
+    bytes[5] = frame.question;
+    bytes[6] = static_cast<uint8_t>(frame.state);
+    bytes[7] = frame.flags;
+    writeUint16Le(bytes.data() + 8, frame.sequence);
+    writeUint16Le(bytes.data() + 10,
+                  static_cast<uint16_t>(frame.leftSpeed50ms));
+    writeUint16Le(bytes.data() + 12,
+                  static_cast<uint16_t>(frame.rightSpeed50ms));
+    writeUint16Le(bytes.data() + 14,
+                  static_cast<uint16_t>(frame.leftTarget50ms));
+    writeUint16Le(bytes.data() + 16,
+                  static_cast<uint16_t>(frame.rightTarget50ms));
+    writeUint32Le(bytes.data() + 18, frame.distanceSteps);
+    writeUint32Le(bytes.data() + 22, frame.elapsedMs);
+    bytes[26] = 0;
+    bytes[27] = xorChecksum(bytes.data(), bytes.size() - 1);
     return DecodeError::None;
 }
 
@@ -250,11 +408,19 @@ inline DecodeError makeFrame(
 struct ParserStats {
     uint64_t bytesReceived = 0;
     uint64_t framesAccepted = 0;
+    uint64_t eventFramesAccepted = 0;
+    uint64_t telemetryFramesAccepted = 0;
+    uint64_t crlfTerminatorsConsumed = 0;
     uint64_t checksumErrors = 0;
     uint64_t formatErrors = 0;
     uint64_t discardedBytes = 0;
     uint64_t duplicateSequences = 0;
     uint64_t sequenceDiscontinuities = 0;
+};
+
+struct ParsedBatch {
+    std::vector<Frame> events;
+    std::vector<TelemetryFrame> telemetry;
 };
 
 class StreamParser {
@@ -285,10 +451,10 @@ class StreamParser {
     }
 
 public:
-    std::vector<Frame> push(const uint8_t* data, std::size_t size)
+    ParsedBatch pushAll(const uint8_t* data, std::size_t size)
     {
-        std::vector<Frame> frames;
-        if (data == nullptr || size == 0) return frames;
+        ParsedBatch batch;
+        if (data == nullptr || size == 0) return batch;
 
         stats_.bytesReceived += size;
         buffer_.insert(buffer_.end(), data, data + size);
@@ -309,16 +475,48 @@ public:
                 break;
             }
             if (header > 0) discardPrefix(header);
-            if (buffer_.size() < kFrameSize) break;
+            if (buffer_.size() < 4) break;
 
-            Frame frame;
-            const DecodeError error =
-                decodeFrame(buffer_.data(), kFrameSize, frame);
+            const std::size_t declaredSize = buffer_[3];
+            if (declaredSize != kFrameSize &&
+                declaredSize != kTelemetryFrameSize) {
+                ++stats_.formatErrors;
+                discardPrefix(1);
+                continue;
+            }
+            if (buffer_.size() < declaredSize) break;
+
+            DecodeError error = DecodeError::WrongDeclaredSize;
+            uint16_t sequence = 0;
+            if (declaredSize == kFrameSize) {
+                Frame frame;
+                error = decodeFrame(buffer_.data(), declaredSize, frame);
+                if (error == DecodeError::None) {
+                    sequence = frame.sequence;
+                    batch.events.push_back(frame);
+                    ++stats_.eventFramesAccepted;
+                }
+            } else {
+                TelemetryFrame frame;
+                error = decodeTelemetryFrame(
+                    buffer_.data(), declaredSize, frame);
+                if (error == DecodeError::None) {
+                    sequence = frame.sequence;
+                    batch.telemetry.push_back(frame);
+                    ++stats_.telemetryFramesAccepted;
+                }
+            }
+
             if (error == DecodeError::None) {
-                frames.push_back(frame);
                 ++stats_.framesAccepted;
-                recordSequence(frame.sequence);
-                buffer_.erase(buffer_.begin(), buffer_.begin() + kFrameSize);
+                recordSequence(sequence);
+                buffer_.erase(
+                    buffer_.begin(), buffer_.begin() + declaredSize);
+                if (buffer_.size() >= 2 &&
+                    buffer_[0] == kCrlf0 && buffer_[1] == kCrlf1) {
+                    buffer_.erase(buffer_.begin(), buffer_.begin() + 2);
+                    ++stats_.crlfTerminatorsConsumed;
+                }
                 continue;
             }
 
@@ -329,7 +527,17 @@ public:
             }
             discardPrefix(1);
         }
-        return frames;
+        return batch;
+    }
+
+    ParsedBatch pushAll(const std::vector<uint8_t>& data)
+    {
+        return pushAll(data.data(), data.size());
+    }
+
+    std::vector<Frame> push(const uint8_t* data, std::size_t size)
+    {
+        return pushAll(data, size).events;
     }
 
     std::vector<Frame> push(const std::vector<uint8_t>& data)
@@ -349,10 +557,10 @@ public:
 };
 
 class SequenceEncoder {
-    uint16_t nextSequence_ = 0;
+    uint16_t nextSequence_ = 1;
 
 public:
-    explicit SequenceEncoder(uint16_t firstSequence = 0)
+    explicit SequenceEncoder(uint16_t firstSequence = 1)
         : nextSequence_(firstSequence)
     {
     }
@@ -388,6 +596,12 @@ public:
     virtual bool setMotorEnabled(bool enabled, const Frame& frame) = 0;
     virtual bool returnToOrigin(const Frame& frame) = 0;
     virtual bool setCurrentPositionAsOrigin(const Frame& frame) = 0;
+};
+
+class TelemetryHandler {
+public:
+    virtual ~TelemetryHandler() = default;
+    virtual bool handleTelemetry(const TelemetryFrame& frame) = 0;
 };
 
 enum class DispatchResult {
@@ -433,6 +647,16 @@ inline DispatchResult dispatchFrame(const Frame& frame, EventHandler& handler)
     return handled ? DispatchResult::Handled : DispatchResult::HandlerRejected;
 }
 
+inline DispatchResult dispatchTelemetryFrame(
+    const TelemetryFrame& frame, TelemetryHandler& handler)
+{
+    if (validateTelemetryFrame(frame) != DecodeError::None) {
+        return DispatchResult::InvalidFrame;
+    }
+    return handler.handleTelemetry(frame) ?
+        DispatchResult::Handled : DispatchResult::HandlerRejected;
+}
+
 class ControlUart {
 #if defined(__linux__)
     int fileDescriptor_ = -1;
@@ -476,6 +700,14 @@ class ControlUart {
         }
         return true;
     }
+
+    bool writePacketWithCrlf(const uint8_t* data, std::size_t size)
+    {
+        std::vector<uint8_t> wire(data, data + size);
+        wire.push_back(kCrlf0);
+        wire.push_back(kCrlf1);
+        return writeAll(wire.data(), wire.size());
+    }
 #endif
 
 public:
@@ -484,7 +716,10 @@ public:
     ControlUart& operator=(const ControlUart&) = delete;
     ~ControlUart() { closePort(); }
 
-    bool openPort(const std::string& device, int baud = kBaud)
+    bool openPort(
+        const std::string& device,
+        int baud = kBaud,
+        bool flushPendingInput = true)
     {
         closePort();
         parser_.reset();
@@ -494,9 +729,19 @@ public:
         }
 
 #if defined(__linux__)
+        struct stat deviceStatus{};
+        if (::stat(device.c_str(), &deviceStatus) != 0) {
+            return fail("stat " + device + " failed: " +
+                        std::strerror(errno));
+        }
+        const std::string lockPath =
+            "/tmp/ball_stepper_contest_control_uart_" +
+            std::to_string(static_cast<unsigned>(major(deviceStatus.st_rdev))) +
+            "_" +
+            std::to_string(static_cast<unsigned>(minor(deviceStatus.st_rdev))) +
+            ".lock";
         lockDescriptor_ = ::open(
-            "/tmp/ball_stepper_contest_control_uart.lock",
-            O_CREAT | O_RDWR | O_CLOEXEC, 0666);
+            lockPath.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0666);
         if (lockDescriptor_ < 0) {
             return fail(std::string("open control UART lock failed: ") +
                         std::strerror(errno));
@@ -542,7 +787,8 @@ public:
             closePort();
             return fail(message);
         }
-        if (::tcflush(fileDescriptor_, TCIOFLUSH) != 0) {
+        const int flushQueue = flushPendingInput ? TCIOFLUSH : TCOFLUSH;
+        if (::tcflush(fileDescriptor_, flushQueue) != 0) {
             const std::string message =
                 std::string("control UART flush failed: ") +
                 std::strerror(errno);
@@ -580,7 +826,9 @@ public:
 #endif
     }
 
-    bool receive(std::vector<Frame>& frames)
+    bool receive(
+        std::vector<Frame>& frames,
+        std::vector<TelemetryFrame>& telemetry)
     {
 #if defined(__linux__)
         if (fileDescriptor_ < 0) return fail("control UART is not open");
@@ -589,9 +837,13 @@ public:
             const ssize_t count =
                 ::read(fileDescriptor_, chunk.data(), chunk.size());
             if (count > 0) {
-                std::vector<Frame> decoded = parser_.push(
+                ParsedBatch decoded = parser_.pushAll(
                     chunk.data(), static_cast<std::size_t>(count));
-                frames.insert(frames.end(), decoded.begin(), decoded.end());
+                frames.insert(
+                    frames.end(), decoded.events.begin(), decoded.events.end());
+                telemetry.insert(
+                    telemetry.end(), decoded.telemetry.begin(),
+                    decoded.telemetry.end());
                 continue;
             }
             if (count == 0) return true;
@@ -602,8 +854,15 @@ public:
         }
 #else
         (void)frames;
+        (void)telemetry;
         return fail("control UART is only available on Linux");
 #endif
+    }
+
+    bool receive(std::vector<Frame>& frames)
+    {
+        std::vector<TelemetryFrame> ignoredTelemetry;
+        return receive(frames, ignoredTelemetry);
     }
 
     bool receiveAndDispatch(
@@ -638,7 +897,24 @@ public:
         }
 #if defined(__linux__)
         if (fileDescriptor_ < 0) return fail("control UART is not open");
-        return writeAll(bytes.data(), bytes.size());
+        return writePacketWithCrlf(bytes.data(), bytes.size());
+#else
+        return fail("control UART is only available on Linux");
+#endif
+    }
+
+
+    bool sendTelemetryFrame(const TelemetryFrame& frame)
+    {
+        std::array<uint8_t, kTelemetryFrameSize> bytes{};
+        const DecodeError error = encodeTelemetryFrame(frame, bytes);
+        if (error != DecodeError::None) {
+            return fail(std::string("invalid telemetry frame: ") +
+                        decodeErrorName(error));
+        }
+#if defined(__linux__)
+        if (fileDescriptor_ < 0) return fail("control UART is not open");
+        return writePacketWithCrlf(bytes.data(), bytes.size());
 #else
         return fail("control UART is only available on Linux");
 #endif
@@ -669,7 +945,7 @@ public:
             return fail(std::string("invalid control frame: ") +
                         decodeErrorName(error));
         }
-        if (!writeAll(bytes.data(), bytes.size())) {
+        if (!writePacketWithCrlf(bytes.data(), bytes.size())) {
             encoder_.setNextSequence(frame.sequence);
             return false;
         }

@@ -80,6 +80,30 @@
 
 // ====================== A. 视觉参数修改区结束 ======================
 
+#ifndef BALL_TASK_LABEL
+#define BALL_TASK_LABEL "TASK4"
+#endif
+
+#ifndef BALL_TASK_PREVIEW_NAME
+#define BALL_TASK_PREVIEW_NAME "ball2-task4-velocity"
+#endif
+
+#ifndef BALL_TASK_EVALUATION_SECONDS
+#define BALL_TASK_EVALUATION_SECONDS 8.0
+#endif
+
+#ifndef BALL_TASK_LOG_EVENT
+#define BALL_TASK_LOG_EVENT "task4_balance"
+#endif
+
+#ifndef BALL_TASK_QUESTION_NUMBER
+#define BALL_TASK_QUESTION_NUMBER 4
+#endif
+
+#ifndef BALL_TASK_CONTROL_IPC_PORT
+#define BALL_TASK_CONTROL_IPC_PORT 17304
+#endif
+
 // include会把视觉、控制、ZDT串口和完整主循环一起编译进最终可执行文件。
 #include "task4_app.hpp"
 
@@ -139,7 +163,7 @@ ball_stepper::AppConfig makeUserConfig()
 
     // ---------------- 3. 第4问钢球PI-D外环 ----------------
     config.task4TargetCm = config.targetCm;
-    config.task4EvaluationSeconds = 8.0;
+    config.task4EvaluationSeconds = BALL_TASK_EVALUATION_SECONDS;
     config.task4AllowedErrorCm = 1.0;
     // 等待阶段球只要位于O点±1 cm并基本静止即可开始。
     config.task4StartToleranceCm = 1.00;
@@ -326,13 +350,16 @@ ball_stepper::AppConfig makeUserConfig()
     // false最安全：启动后处于PAUSED并保持水平，按空格才进入闭环。
     config.startArmed = false;
     // E611图传直接发送displayFrame，不再创建X11/OpenCV本地窗口。
-    // 普通SSH终端仍可直接按SPACE/R/Q；正式比赛应接车载实体启动按钮。
+    // 正式版由开机常驻监听器转发第四问事件和20 Hz底盘遥测。
     config.gui = false;
-    config.terminalKeys = true;
+    config.terminalKeys = false;
+    config.controlIpcEnabled = true;
+    config.controlIpcRequired = true;
+    config.controlIpcPort = BALL_TASK_CONTROL_IPC_PORT;
     config.csv = false;
     config.runtimeLogEnabled = true;
     config.runtimeLogDirectory = "logs";
-    config.runtimeLogEvent = "task4_balance";
+    config.runtimeLogEvent = BALL_TASK_LOG_EVENT;
     config.runtimeLogIntervalMs = 100;
 
     // 每个控制帧都提交最新预览。SSH/X11显示慢时只丢旧预览帧，
@@ -369,7 +396,7 @@ int main()
     // 第4问专用版没有题号参数；钢球在O点稳定后按空格开始8秒考核。
     const ball_stepper::AppConfig config = makeUserConfig();
     std::fprintf(stderr,
-        "TASK4 VELOCITY: O=(%.1f,%.1f) limit=%.2fcm time=%.1fs "
+        BALL_TASK_LABEL " VELOCITY: O=(%.1f,%.1f) limit=%.2fcm time=%.1fs "
         "PDI=%.3f/%.3f/%.3f drive=%.3f brake=%.3fdeg\n",
         config.centerCalibrationPoint.x,
         config.centerCalibrationPoint.y,

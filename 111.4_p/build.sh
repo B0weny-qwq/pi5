@@ -35,11 +35,14 @@ echo "Building on Linux ${architecture} with g++ ${compiler_version}"
 opencv_flags=( $(pkg-config --cflags --libs opencv4) )
 common_flags=(-std=c++17 -Wall -Wextra -Wpedantic -pthread)
 
-# The control link is a fixed 12-byte binary protocol. Verify framing,
-# resynchronization, checksum, little-endian sequence and sequence wrap first.
+# Run the listener's shared event/telemetry/CRLF protocol suite before TASK4.
 g++ -O2 "${common_flags[@]}" contest_control_uart_test.cpp \
     -o contest_control_uart_test
 ./contest_control_uart_test
+
+g++ -O2 "${common_flags[@]}" contest_control_ipc_test.cpp \
+    -o contest_control_ipc_test
+./contest_control_ipc_test
 
 # 先在树莓派本机验证0xF6报文、软限位和位置/速度/加速度串级环。
 g++ -O2 "${common_flags[@]}" motor_velocity_control_test.cpp \
