@@ -749,14 +749,17 @@ inline int runTask3App(const AppConfig& config)
 
         if (now >= nextRuntimeLogTime) {
             diagnostics.write(
-                "LOOP armed=%d center_ready=%d/6 ball=%d locked=%d "
+                "LOOP armed=%d phase=%s mode=%s "
+                "center_ready=%d/6 ball=%d locked=%d "
                 "confidence=%.2f px=(%.1f,%.1f) cm=%.3f target=%.3f "
                 "error=%+.3f v=%.3f v2=%.3f "
                 "P=%+.4f D=%+.4f I=%+.4f request=%+.4f "
                 "breakaway=%+.4f lim=%.3f+%.3f applied=%+.4f "
                 "M[tgt=%d pos=%.1f target_rpm=%+.2f actual_rpm=%+.2f "
                 "cmd=%+.2f wire=%+.2f acc=%+.2f]",
-                armed ? 1 : 0, std::min(centerReadyFrames, 6),
+                armed ? 1 : 0, task3.phaseText(),
+                task3MotionModeText(motionCommand.mode),
+                std::min(centerReadyFrames, 6),
                 result.measured ? 1 : 0, result.locked ? 1 : 0,
                 result.confidence,
                 result.measured ? result.center.x : -1.0f,

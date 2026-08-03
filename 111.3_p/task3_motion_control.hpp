@@ -196,9 +196,10 @@ public:
             breakawayDirection_ = desiredDirection;
         }
 
-        const bool movingPhase =
+        const bool correctionPhase =
             phase == Task3Phase::MoveToPositive ||
-            phase == Task3Phase::MoveToNegative;
+            phase == Task3Phase::MoveToNegative ||
+            phase == Task3Phase::HoldNegative;
         const bool largeUnresolvedError =
             std::abs(errorCm) >= config_.task3BreakawayErrorCm;
         const bool ballNearlyStopped =
@@ -207,7 +208,7 @@ public:
             desiredDirection != 0 &&
             baseAngleDeg * static_cast<double>(desiredDirection) > 0.0;
         const bool shouldBuildBreakaway =
-            movingPhase && largeUnresolvedError && ballNearlyStopped &&
+            correctionPhase && largeUnresolvedError && ballNearlyStopped &&
             baseStillDrivesTowardTarget;
 
         if (shouldBuildBreakaway) {

@@ -20,8 +20,8 @@ void testSequence()
     config.task3ArrivalConfirmFrames = 2;
     config.task3FinalToleranceCm = 0.20;
     config.task3FinalRightToleranceCm = 0.02;
-    config.task3FinalSpeedCmS = 1.5;
-    config.task3FinalStableMs = 80;
+    config.task3FinalSpeedCmS = 0.6;
+    config.task3FinalStableMs = 250;
 
     Task3Sequence sequence(config);
     sequence.start(0.0);
@@ -42,7 +42,7 @@ void testSequence()
     assert(sequence.phase() == Task3Phase::MoveToNegative);
 
     sequence.update(0.01, 0.0, 0.30);
-    sequence.update(0.01, 0.0, 0.39);
+    sequence.update(0.01, 0.0, 0.56);
     assert(sequence.phase() == Task3Phase::HoldNegative);
 }
 
@@ -51,7 +51,7 @@ AppConfig makePdiConfig()
     AppConfig config;
     config.task3MoveRightPositionKpDegPerCm = 0.300;
     config.task3MoveLeftPositionKpDegPerCm = 0.035;
-    config.task3VelocityKdDegPerCmS = 0.020;
+    config.task3VelocityKdDegPerCmS = 0.040;
     config.task3IntegralKiDegPerCmSecond = 0.120;
     config.task3IntegralZoneCm = 0.80;
     config.task3IntegralSpeedLimitCmS = 1.2;
@@ -61,7 +61,7 @@ AppConfig makePdiConfig()
     config.task3BreakawayDelaySeconds = 0.08;
     config.task3BreakawayRampDegPerSecond = 0.80;
     config.task3MoveRightBreakawayMaximumAngleDeg = 0.16;
-    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.12;
+    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.22;
     config.task3MoveRightOutputAngleLimitDeg = 0.75;
     config.task3MoveLeftOutputAngleLimitDeg = 0.40;
     return config;
@@ -85,8 +85,8 @@ void testPdiMotionController()
     const Task3MotionCommand positiveFast = controller.update(
         Task3Phase::MoveToPositive, -1.5, 5.0, 0.01);
     assert(std::abs(positiveFast.proportionalAngleDeg + 0.45) < 1e-9);
-    assert(std::abs(positiveFast.derivativeAngleDeg - 0.10) < 1e-9);
-    assert(std::abs(positiveFast.angleDeg + 0.35) < 1e-9);
+    assert(std::abs(positiveFast.derivativeAngleDeg - 0.20) < 1e-9);
+    assert(std::abs(positiveFast.angleDeg + 0.25) < 1e-9);
 
     // Equal position-error magnitudes intentionally produce different P terms
     // because the measured mechanism requires more authority to move right.
@@ -113,8 +113,8 @@ void testPdiMotionController()
         Task3Phase::MoveToNegative, 1.0, -2.0, 0.01);
     const Task3MotionCommand returnFast = controller.update(
         Task3Phase::MoveToNegative, 1.0, -5.0, 0.01);
-    assert(std::abs(returnSlow.derivativeAngleDeg + 0.04) < 1e-9);
-    assert(std::abs(returnFast.derivativeAngleDeg + 0.10) < 1e-9);
+    assert(std::abs(returnSlow.derivativeAngleDeg + 0.08) < 1e-9);
+    assert(std::abs(returnFast.derivativeAngleDeg + 0.20) < 1e-9);
     assert(returnFast.angleDeg < returnSlow.angleDeg);
     assert(returnFast.angleDeg < 0.0);
 
@@ -176,8 +176,21 @@ void testPdiMotionController()
             Task3Phase::MoveToNegative, 20.0, 0.0, 0.02);
     }
     assert(leftStuckCommand.breakawayActive);
-    assert(std::abs(leftStuckCommand.breakawayAngleDeg - 0.12) < 1e-9);
-    assert(std::abs(leftStuckCommand.angleDeg - 0.52) < 1e-9);
+    assert(std::abs(leftStuckCommand.breakawayAngleDeg - 0.22) < 1e-9);
+    assert(std::abs(leftStuckCommand.angleDeg - 0.62) < 1e-9);
+
+    // Hold must still overcome linkage play if the ball drifts well outside
+    // the final I window after the sequence has reported completion.
+    Task3MotionController holdBreakawayController(config);
+    Task3MotionCommand holdStuckCommand;
+    for (int index = 0; index < 30; ++index) {
+        holdStuckCommand = holdBreakawayController.update(
+            Task3Phase::HoldNegative, 2.5, 0.0, 0.02);
+    }
+    assert(holdStuckCommand.breakawayActive);
+    assert(std::abs(holdStuckCommand.breakawayAngleDeg - 0.22) < 1e-9);
+    assert(holdStuckCommand.angleDeg >
+           holdStuckCommand.proportionalAngleDeg);
 }
 
 void testTwoFrameSpeedEstimator()

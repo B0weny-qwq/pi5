@@ -80,8 +80,8 @@ struct AppConfig {
     // 左侧仍保留较宽容差，用于吸收返程惯性和视觉测量抖动。
     double task3FinalToleranceCm = 0.50;
     double task3FinalRightToleranceCm = 0.15;
-    double task3FinalSpeedCmS = 1.0;
-    int task3FinalStableMs = 200;
+    double task3FinalSpeedCmS = 0.6;
+    int task3FinalStableMs = 250;
     int task3TimeLimitMs = 5000;
 
     // ---------------- 第3题钢球位置 PDI 外环 ----------------
@@ -90,7 +90,7 @@ struct AppConfig {
     // the normal output limit, and breakaway authority are tuned per direction.
     double task3MoveRightPositionKpDegPerCm = 0.300;
     double task3MoveLeftPositionKpDegPerCm = 0.035;
-    double task3VelocityKdDegPerCmS = 0.020;
+    double task3VelocityKdDegPerCmS = 0.040;
     // I is active only near either target.  It is reset whenever the target
     // changes and is capped by the two values below.
     double task3IntegralKiDegPerCmSecond = 0.120;
@@ -107,7 +107,7 @@ struct AppConfig {
     double task3BreakawayDelaySeconds = 0.08;
     double task3BreakawayRampDegPerSecond = 0.80;
     double task3MoveRightBreakawayMaximumAngleDeg = 0.16;
-    double task3MoveLeftBreakawayMaximumAngleDeg = 0.12;
+    double task3MoveLeftBreakawayMaximumAngleDeg = 0.22;
 
     // These are directional safety/output scales, never fixed travel commands.
     // The PDI sum is continuously calculated and clamped to this asymmetric

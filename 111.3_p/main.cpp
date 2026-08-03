@@ -149,8 +149,8 @@ ball_stepper::AppConfig makeUserConfig()
     // continues holding the target after completion.
     config.task3FinalToleranceCm = 0.20;
     config.task3FinalRightToleranceCm = 0.02;
-    config.task3FinalSpeedCmS = 1.5;
-    config.task3FinalStableMs = 80;
+    config.task3FinalSpeedCmS = 0.6;
+    config.task3FinalStableMs = 250;
     config.task3TimeLimitMs = 5000;
 
     // ---------------- 4. 钢球 PDI 外环 ----------------
@@ -162,7 +162,7 @@ ball_stepper::AppConfig makeUserConfig()
     // travel angles.
     config.task3MoveRightPositionKpDegPerCm = 0.300;
     config.task3MoveLeftPositionKpDegPerCm = 0.035;
-    config.task3VelocityKdDegPerCmS = 0.020;
+    config.task3VelocityKdDegPerCmS = 0.040;
 
     // I opens only inside the final 0.80 cm window and below 1.2 cm/s. Its
     // maximum output is 0.120 * 0.90 = 0.108 deg, so P still dominates.
@@ -179,11 +179,11 @@ ball_stepper::AppConfig makeUserConfig()
     config.task3BreakawayDelaySeconds = 0.08;
     config.task3BreakawayRampDegPerSecond = 0.80;
     config.task3MoveRightBreakawayMaximumAngleDeg = 0.16;
-    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.12;
+    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.22;
 
     // Asymmetric PDI saturation. Rightward motion can reach -0.75 deg normally
     // and -0.91 deg only when feedback confirms a stall. Leftward motion is
-    // limited to +0.40/+0.52 deg because that side of the mechanism is stronger.
+    // limited to +0.40/+0.62 deg; the extra range is feedback-triggered only.
     config.task3MoveRightOutputAngleLimitDeg = 0.75;
     config.task3MoveLeftOutputAngleLimitDeg = 0.40;
 
