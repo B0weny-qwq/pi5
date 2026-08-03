@@ -27,6 +27,11 @@ struct CalibrationPoint {
     int motorSteps = 0;
 };
 
+struct AccelerationFeedforwardPoint {
+    double accelerationUnitsS = 0.0;
+    double angleDeg = 0.0;
+};
+
 struct AppConfig {
     // ---------------- 摄像头 ----------------
     int cameraIndex = 0;
@@ -98,6 +103,12 @@ struct AppConfig {
     double task4VehicleAccelerationDecaySeconds = 0.120;
     double task4VehicleAccelerationDeadbandUnitsS = 15.0;
     double task4VehicleAccelerationLimitUnitsS = 2000.0;
+    bool task4VehicleFeedforwardInterpolate = true;
+    std::vector<AccelerationFeedforwardPoint>
+        task4VehicleAccelerationFeedforwardMap;
+    std::vector<AccelerationFeedforwardPoint>
+        task4VehicleBrakingFeedforwardMap;
+    // Used only when the corresponding table is empty.
     double task4VehicleFeedforwardDegPerUnitS = 0.00040;
     double task4VehicleAccelerationAngleSign = -1.0;
     double task4VehicleFeedforwardLimitDeg = 0.50;
@@ -353,6 +364,44 @@ inline bool validateConfig(const AppConfig& config)
         std::abs(config.task4LevelTrimDeg) >
             config.task4DriveAngleLimitDeg) {
         std::fprintf(stderr, "invalid TASK 4 control parameter in main.cpp\n");
+        return false;
+    }
+
+    const auto validFeedforwardMap = [&](const auto& points,
+                                          const char* name) {
+        if (points.empty()) return true;
+        if (points.front().accelerationUnitsS != 0.0 ||
+            points.front().angleDeg != 0.0) {
+            std::fprintf(stderr,
+                "%s must start with {0.0, 0.0}\n", name);
+            return false;
+        }
+        for (std::size_t index = 0; index < points.size(); ++index) {
+            const auto& point = points[index];
+            if (!std::isfinite(point.accelerationUnitsS) ||
+                !std::isfinite(point.angleDeg) ||
+                point.accelerationUnitsS < 0.0 || point.angleDeg < 0.0 ||
+                point.angleDeg > config.task4VehicleFeedforwardLimitDeg) {
+                std::fprintf(stderr, "invalid point in %s\n", name);
+                return false;
+            }
+            if (index > 0 &&
+                (point.accelerationUnitsS <=
+                     points[index - 1].accelerationUnitsS ||
+                 point.angleDeg < points[index - 1].angleDeg)) {
+                std::fprintf(stderr,
+                    "%s must increase by acceleration and angle\n", name);
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!validFeedforwardMap(
+            config.task4VehicleAccelerationFeedforwardMap,
+            "task4VehicleAccelerationFeedforwardMap") ||
+        !validFeedforwardMap(
+            config.task4VehicleBrakingFeedforwardMap,
+            "task4VehicleBrakingFeedforwardMap")) {
         return false;
     }
 

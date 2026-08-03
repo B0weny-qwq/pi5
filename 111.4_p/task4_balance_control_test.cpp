@@ -101,6 +101,11 @@ void testVehicleAccelerationFeedforwardInterfaceAndPolarity()
     config.task4VehicleAccelerationAngleSign = -1.0;
     config.task4VehicleFeedforwardDegPerUnitS = 0.00040;
     config.task4VehicleFeedforwardLimitDeg = 0.65;
+    config.task4VehicleFeedforwardInterpolate = true;
+    config.task4VehicleAccelerationFeedforwardMap = {
+        {0.0, 0.0}, {400.0, 0.24}, {1600.0, 0.65}, {2000.0, 0.65}};
+    config.task4VehicleBrakingFeedforwardMap = {
+        {0.0, 0.0}, {400.0, 0.30}, {1600.0, 0.65}, {2000.0, 0.65}};
 
     VehicleMotionFeedforward feedforward(config);
     feedforward.reset(0.0);
@@ -109,32 +114,37 @@ void testVehicleAccelerationFeedforwardInterfaceAndPolarity()
     assert(state.signalFresh);
     assert(std::abs(state.feedforwardAngleDeg) < 1e-9);
 
-    // The 20 Hz encoder is cleared every sample. A 0 -> 80 transition in
-    // 50 ms is +1600 raw speed-units/s and should nearly reach the FF limit.
-    assert(feedforward.submitEncoderSample({80.0, 0.05, 2}));
+    // A 0 -> 20 transition in 50 ms is +400 units/s. The nonlinear table
+    // intentionally gives 0.24 deg instead of the linear fallback's 0.16 deg.
+    assert(feedforward.submitEncoderSample({20.0, 0.05, 2}));
     state = feedforward.update(0.05);
-    assert(state.rawAccelerationUnitsS > 1590.0);
-    assert(state.feedforwardAngleDeg < -0.63);
+    assert(state.rawAccelerationUnitsS > 390.0);
+    assert(state.feedforwardUsedTable);
+    assert(state.feedforwardMapSegment == 0);
+    assert(std::abs(state.feedforwardMappedMagnitudeDeg - 0.24) < 0.01);
+    assert(state.feedforwardAngleDeg < -0.23);
 
     Task4BalanceController controller(config);
     controller.reset(0.05);
     const Task4ControlOutput output = controller.update(
         0.0, 0.0, state.feedforwardAngleDeg, 0.06);
     assert(output.deadband);
-    assert(output.feedforwardTermDeg < -0.55);
-    assert(output.angleDeg < -0.55);
+    assert(output.feedforwardTermDeg < -0.23);
+    assert(output.angleDeg < -0.23);
 
-    // A second cruise sample at 80 is steady speed, not acceleration.
-    assert(feedforward.submitEncoderSample({80.0, 0.10, 3}));
+    // A second sample at 20 is steady speed, not acceleration.
+    assert(feedforward.submitEncoderSample({20.0, 0.10, 3}));
     state = feedforward.update(0.10);
     assert(std::abs(state.rawAccelerationUnitsS) < 1.0);
     assert(std::abs(state.feedforwardAngleDeg) < 0.01);
 
-    // Braking the chassis reverses acceleration and must reverse FF polarity.
+    // Braking by 20 units uses the separate braking map: +0.30 deg.
     assert(feedforward.submitEncoderSample({0.0, 0.15, 4}));
     state = feedforward.update(0.15);
-    assert(state.rawAccelerationUnitsS < -1590.0);
-    assert(state.feedforwardAngleDeg > 0.63);
+    assert(state.rawAccelerationUnitsS < -390.0);
+    assert(state.feedforwardMapDirection == -1);
+    assert(std::abs(state.feedforwardMappedMagnitudeDeg - 0.30) < 0.01);
+    assert(state.feedforwardAngleDeg > 0.29);
 
     const double beforeStaleDecay =
         std::abs(state.filteredAccelerationUnitsS);

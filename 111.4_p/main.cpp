@@ -182,6 +182,24 @@ ball_stepper::AppConfig makeUserConfig()
     config.task4VehicleAccelerationDeadbandUnitsS = 15.0;
     config.task4VehicleAccelerationLimitUnitsS = 2000.0;
 
+    // Nonlinear acceleration -> feedforward calibration. Values between points
+    // are interpolated, so the output stays continuous while each range can be
+    // tuned independently from the runtime CSV log.
+    config.task4VehicleFeedforwardInterpolate = true;
+    config.task4VehicleAccelerationFeedforwardMap = {
+        {   0.0, 0.00},
+        {  80.0, 0.06},
+        { 160.0, 0.11},
+        { 300.0, 0.18},
+        { 500.0, 0.28},
+        { 800.0, 0.40},
+        {1200.0, 0.54},
+        {1600.0, 0.65},
+        {2000.0, 0.65},
+    };
+    config.task4VehicleBrakingFeedforwardMap =
+        config.task4VehicleAccelerationFeedforwardMap;
+
     // Positive chassis acceleration toward axisRight makes the ball lag left,
     // so the default compensation is a negative pipe angle. Flip only this
     // sign if the supplied chassis-speed coordinate is opposite.

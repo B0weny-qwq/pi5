@@ -225,7 +225,9 @@ public:
                 "pixel_y,position_cm,error_cm,speed_cm_s,two_frame_speed_cm_s,"
                 "vehicle_speed_raw_units,vehicle_speed_filtered_units,"
                 "vehicle_accel_raw_units_s,vehicle_accel_filtered_units_s,"
-                "vehicle_sample_age_ms,"
+                "vehicle_ff_direction,vehicle_ff_segment,"
+                "vehicle_ff_map_input_units_s,vehicle_ff_mapped_deg,"
+                "vehicle_ff_unclamped_deg,vehicle_sample_age_ms,"
                 "vehicle_signal_fresh,ff_deg,p_deg,d_deg,i_deg,drive_deg,"
                 "request_deg,applied_deg,"
                 "motor_target_steps,motor_actual_steps,motor_target_rpm,"
@@ -287,15 +289,22 @@ public:
         std::fprintf(
             csvFile_,
             "%.6f,%d,%d,%d,%d,%.5f,%.3f,%.3f,%.5f,%+.5f,%+.5f,%+.5f,"
-            "%+.6f,%+.6f,%+.6f,%+.6f,%.2f,%d,%+.6f,%+.6f,%+.6f,"
-            "%+.6f,%+.6f,%+.6f,%+.6f,%d,%+.3f,%+.3f,"
+            "%+.6f,%+.6f,%+.6f,%+.6f,%d,%d,%+.6f,%+.6f,%+.6f,"
+            "%.2f,%d,%+.6f,%+.6f,%+.6f,%+.6f,%+.6f,%+.6f,%+.6f,"
+            "%d,%+.3f,%+.3f,"
             "%+.3f,%+.3f,%+.3f,%+.3f,%.5f,%.1f\n",
             secondsNow() - startTime_, armed ? 1 : 0, finished ? 1 : 0,
             result.measured ? 1 : 0, result.locked ? 1 : 0,
             result.confidence, pixelX, pixelY, positionCm, errorCm,
             speedCmS, rawTwoFrameSpeedCmS, vehicle.rawSpeedUnits,
             vehicle.filteredSpeedUnits, vehicle.rawAccelerationUnitsS,
-            vehicle.filteredAccelerationUnitsS, vehicle.sampleAgeMs,
+            vehicle.filteredAccelerationUnitsS,
+            vehicle.feedforwardMapDirection,
+            vehicle.feedforwardMapSegment,
+            vehicle.feedforwardMapInputUnitsS,
+            vehicle.feedforwardMappedMagnitudeDeg,
+            vehicle.feedforwardUnclampedAngleDeg,
+            vehicle.sampleAgeMs,
             vehicle.signalFresh ? 1 : 0, control.feedforwardTermDeg,
             control.pTermDeg,
             control.dTermDeg, control.iTermDeg, control.driveAngleDeg,
@@ -322,13 +331,16 @@ inline int runTask4VelocityApp(
     diagnostics.write(
         "START motor=%d ppr=%d command_hz=%d max_rpm=%d slope=%d "
         "P=%.3f D=%.3f I=%.3f drive=%.3f brake=%.3f "
-        "encoder_source=%d ff_gain=%.6fdeg/(unit/s) "
-        "ff_limit=%.3f sign=%+.0f cruise=%.1f",
+        "encoder_source=%d ff_maps=%zu/%zu interpolate=%d "
+        "fallback_gain=%.6f ff_limit=%.3f sign=%+.0f cruise=%.1f",
         config.motorEnabled ? 1 : 0, config.pulsesPerRevolution,
         config.motorCommandHz, config.motorRpm, config.motorSpeedSlopeRpmS,
         config.task4Kp, config.task4Kd, config.task4Ki,
         config.task4DriveAngleLimitDeg, config.task4BrakeAngleLimitDeg,
         vehicleEncoderSource ? 1 : 0,
+        config.task4VehicleAccelerationFeedforwardMap.size(),
+        config.task4VehicleBrakingFeedforwardMap.size(),
+        config.task4VehicleFeedforwardInterpolate ? 1 : 0,
         config.task4VehicleFeedforwardDegPerUnitS,
         config.task4VehicleFeedforwardLimitDeg,
         config.task4VehicleAccelerationAngleSign,
@@ -616,6 +628,7 @@ inline int runTask4VelocityApp(
     uint64_t sequence = 0;
     double nextVideoStreamTime = secondsNow();
     double nextRuntimeLogTime = secondsNow();
+    double nextVehicleStatusTime = secondsNow();
     double nextPausedStatusTime = secondsNow();
     bool videoStreamFailureReported = false;
     int controlFrames = 0;
@@ -778,6 +791,29 @@ inline int runTask4VelocityApp(
                 config.runtimeLogIntervalMs / 1000.0;
         }
 
+        if (now >= nextVehicleStatusTime) {
+            diagnostics.write(
+                "CAR_ENCODER source=%d fresh=%d age=%.0fms "
+                "raw_v=%+.2f filt_v=%+.2f raw_a=%+.1f filt_a=%+.1f "
+                "dir=%+d segment=%d map_input=%.1f mapped=%.3fdeg "
+                "ff_raw=%+.3fdeg ff=%+.3fdeg request=%+.3fdeg",
+                vehicleEncoderSource ? 1 : 0,
+                vehicleMotion.signalFresh ? 1 : 0,
+                vehicleMotion.sampleAgeMs,
+                vehicleMotion.rawSpeedUnits,
+                vehicleMotion.filteredSpeedUnits,
+                vehicleMotion.rawAccelerationUnitsS,
+                vehicleMotion.filteredAccelerationUnitsS,
+                vehicleMotion.feedforwardMapDirection,
+                vehicleMotion.feedforwardMapSegment,
+                vehicleMotion.feedforwardMapInputUnitsS,
+                vehicleMotion.feedforwardMappedMagnitudeDeg,
+                vehicleMotion.feedforwardUnclampedAngleDeg,
+                vehicleMotion.feedforwardAngleDeg,
+                requestedAngleDeg);
+            nextVehicleStatusTime = now + 0.5;
+        }
+
         if (!armed && now >= nextPausedStatusTime) {
             const char* reason = !measuredNow ? "BALL_NOT_FOUND" :
                 !startPositionReady ? "OUTSIDE_START_WINDOW" :
@@ -788,7 +824,7 @@ inline int runTask4VelocityApp(
                 "WAIT reason=%s measured=%d error=%+.3fcm allowed=+/-%.3fcm "
                 "speed=%+.3fcm/s speed_limit=%.3f ready=%d/%d "
                 "encoder_source=%d encoder_fresh=%d car_v=%+.2funit "
-                "car_a=%+.1funit/s ff=%+.3fdeg "
+                "car_a=%+.1funit/s seg=%d map=%.3fdeg ff=%+.3fdeg "
                 "video_sent=%llu video_failed=%d",
                 reason, measuredNow ? 1 : 0, errorCm,
                 config.task4StartToleranceCm, speedCmS,
@@ -798,6 +834,8 @@ inline int runTask4VelocityApp(
                 vehicleMotion.signalFresh ? 1 : 0,
                 vehicleMotion.filteredSpeedUnits,
                 vehicleMotion.filteredAccelerationUnitsS,
+                vehicleMotion.feedforwardMapSegment,
+                vehicleMotion.feedforwardMappedMagnitudeDeg,
                 vehicleMotion.feedforwardAngleDeg,
                 static_cast<unsigned long long>(
                     videoStreamer ? videoStreamer->sentFrames() : 0),
@@ -957,12 +995,13 @@ inline int runTask4VelocityApp(
                         {0, 255, 255}, 1, cv::LINE_AA);
 
             std::snprintf(line, sizeof(line),
-                "CAR src=%d fresh=%d v=%+.1f a=%+.1funit/s age=%.0fms",
+                "CAR src=%d fresh=%d v=%+.1f a=%+.1f seg=%d map=%.3f",
                 vehicleEncoderSource ? 1 : 0,
                 vehicleMotion.signalFresh ? 1 : 0,
                 vehicleMotion.filteredSpeedUnits,
                 vehicleMotion.filteredAccelerationUnitsS,
-                vehicleMotion.sampleAgeMs);
+                vehicleMotion.feedforwardMapSegment,
+                vehicleMotion.feedforwardMappedMagnitudeDeg);
             cv::putText(displayFrame, line, {10, 124},
                         cv::FONT_HERSHEY_SIMPLEX, 0.43,
                         vehicleMotion.signalFresh ?

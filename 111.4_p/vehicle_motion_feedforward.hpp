@@ -27,7 +27,17 @@ struct VehicleMotionState {
     double filteredSpeedUnits = 0.0;
     double rawAccelerationUnitsS = 0.0;
     double filteredAccelerationUnitsS = 0.0;
+    double feedforwardMapInputUnitsS = 0.0;
+    double feedforwardMapLowerUnitsS = 0.0;
+    double feedforwardMapUpperUnitsS = 0.0;
+    double feedforwardMapLowerAngleDeg = 0.0;
+    double feedforwardMapUpperAngleDeg = 0.0;
+    double feedforwardMappedMagnitudeDeg = 0.0;
+    double feedforwardUnclampedAngleDeg = 0.0;
     double feedforwardAngleDeg = 0.0;
+    int feedforwardMapDirection = 0;
+    int feedforwardMapSegment = -1;
+    bool feedforwardUsedTable = false;
     double sampleAgeMs = 1e9;
     bool signalReceived = false;
     bool signalFresh = false;
@@ -44,6 +54,83 @@ class VehicleMotionFeedforward {
     double filteredSpeedUnits_ = 0.0;
     double rawAccelerationUnitsS_ = 0.0;
     double filteredAccelerationUnitsS_ = 0.0;
+
+    struct FeedforwardLookup {
+        double magnitudeDeg = 0.0;
+        double lowerUnitsS = 0.0;
+        double upperUnitsS = 0.0;
+        double lowerAngleDeg = 0.0;
+        double upperAngleDeg = 0.0;
+        int segment = -1;
+        bool usedTable = false;
+    };
+
+    FeedforwardLookup lookupFeedforward(
+        double accelerationMagnitudeUnitsS,
+        bool braking) const
+    {
+        const auto& brakingMap = config_.task4VehicleBrakingFeedforwardMap;
+        const auto& accelerationMap =
+            config_.task4VehicleAccelerationFeedforwardMap;
+        const auto& points = braking && !brakingMap.empty() ?
+            brakingMap : accelerationMap;
+
+        FeedforwardLookup lookup;
+        if (points.empty()) {
+            lookup.magnitudeDeg =
+                config_.task4VehicleFeedforwardDegPerUnitS *
+                accelerationMagnitudeUnitsS;
+            return lookup;
+        }
+
+        lookup.usedTable = true;
+        if (accelerationMagnitudeUnitsS <= points.front().accelerationUnitsS) {
+            lookup.magnitudeDeg = points.front().angleDeg;
+            lookup.lowerUnitsS = points.front().accelerationUnitsS;
+            lookup.upperUnitsS = points.front().accelerationUnitsS;
+            lookup.lowerAngleDeg = points.front().angleDeg;
+            lookup.upperAngleDeg = points.front().angleDeg;
+            lookup.segment = 0;
+            return lookup;
+        }
+
+        for (std::size_t upperIndex = 1;
+             upperIndex < points.size(); ++upperIndex) {
+            if (accelerationMagnitudeUnitsS >
+                points[upperIndex].accelerationUnitsS) {
+                continue;
+            }
+            const auto& lower = points[upperIndex - 1];
+            const auto& upper = points[upperIndex];
+            lookup.lowerUnitsS = lower.accelerationUnitsS;
+            lookup.upperUnitsS = upper.accelerationUnitsS;
+            lookup.lowerAngleDeg = lower.angleDeg;
+            lookup.upperAngleDeg = upper.angleDeg;
+            lookup.segment = static_cast<int>(upperIndex - 1);
+            if (config_.task4VehicleFeedforwardInterpolate) {
+                const double ratio = std::clamp(
+                    (accelerationMagnitudeUnitsS - lower.accelerationUnitsS) /
+                        (upper.accelerationUnitsS - lower.accelerationUnitsS),
+                    0.0, 1.0);
+                lookup.magnitudeDeg = lower.angleDeg +
+                    ratio * (upper.angleDeg - lower.angleDeg);
+            } else {
+                lookup.magnitudeDeg =
+                    accelerationMagnitudeUnitsS >= upper.accelerationUnitsS ?
+                        upper.angleDeg : lower.angleDeg;
+            }
+            return lookup;
+        }
+
+        const auto& last = points.back();
+        lookup.magnitudeDeg = last.angleDeg;
+        lookup.lowerUnitsS = last.accelerationUnitsS;
+        lookup.upperUnitsS = last.accelerationUnitsS;
+        lookup.lowerAngleDeg = last.angleDeg;
+        lookup.upperAngleDeg = last.angleDeg;
+        lookup.segment = static_cast<int>(points.size() - 1);
+        return lookup;
+    }
 
 public:
     explicit VehicleMotionFeedforward(const AppConfig& config)
@@ -152,10 +239,24 @@ public:
         state.filteredSpeedUnits = filteredSpeedUnits_;
         state.rawAccelerationUnitsS = rawAccelerationUnitsS_;
         state.filteredAccelerationUnitsS = filteredAccelerationUnitsS_;
-        state.feedforwardAngleDeg = std::clamp(
+        state.feedforwardMapInputUnitsS = std::abs(accelerationForAngle);
+        state.feedforwardMapDirection = accelerationForAngle > 0.0 ? 1 :
+            (accelerationForAngle < 0.0 ? -1 : 0);
+        const FeedforwardLookup lookup = lookupFeedforward(
+            state.feedforwardMapInputUnitsS,
+            state.feedforwardMapDirection < 0);
+        state.feedforwardMapLowerUnitsS = lookup.lowerUnitsS;
+        state.feedforwardMapUpperUnitsS = lookup.upperUnitsS;
+        state.feedforwardMapLowerAngleDeg = lookup.lowerAngleDeg;
+        state.feedforwardMapUpperAngleDeg = lookup.upperAngleDeg;
+        state.feedforwardMappedMagnitudeDeg = lookup.magnitudeDeg;
+        state.feedforwardMapSegment = lookup.segment;
+        state.feedforwardUsedTable = lookup.usedTable;
+        state.feedforwardUnclampedAngleDeg =
             config_.task4VehicleAccelerationAngleSign *
-                config_.task4VehicleFeedforwardDegPerUnitS *
-                accelerationForAngle,
+            std::copysign(lookup.magnitudeDeg, accelerationForAngle);
+        state.feedforwardAngleDeg = std::clamp(
+            state.feedforwardUnclampedAngleDeg,
             -config_.task4VehicleFeedforwardLimitDeg,
              config_.task4VehicleFeedforwardLimitDeg);
         return state;
