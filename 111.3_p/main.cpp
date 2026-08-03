@@ -179,11 +179,11 @@ ball_stepper::AppConfig makeUserConfig()
     config.task3BreakawayDelaySeconds = 0.08;
     config.task3BreakawayRampDegPerSecond = 0.80;
     config.task3MoveRightBreakawayMaximumAngleDeg = 0.16;
-    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.22;
+    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.28;
 
     // Asymmetric PDI saturation. Rightward motion can reach -0.75 deg normally
     // and -0.91 deg only when feedback confirms a stall. Leftward motion is
-    // limited to +0.40/+0.62 deg; the extra range is feedback-triggered only.
+    // limited to +0.40/+0.68 deg; the extra range is feedback-triggered only.
     config.task3MoveRightOutputAngleLimitDeg = 0.75;
     config.task3MoveLeftOutputAngleLimitDeg = 0.40;
 
@@ -268,7 +268,7 @@ ball_stepper::AppConfig makeUserConfig()
     config.motorBrakingAccelerationRpmS = 200.0;
 
     // 0.75 step is the exact scale conversion; use one feedback pulse.
-    config.motorPositionToleranceSteps = 1.0;
+    config.motorPositionToleranceSteps = 0.35;
     config.motorStopSpeedRpm = 1.0;
     config.motorEncoderSpeedFilterSeconds = 0.04;
 
@@ -278,7 +278,8 @@ ball_stepper::AppConfig makeUserConfig()
     // Driver Response must be None. Read commands still return 0x30/0x35
     // data, while suppressing asynchronous 0xF6 ACK frames at 50 Hz.
     config.motorExpectCommandAck = false;
-    config.motorReplyTimeoutMs = 15;
+    config.motorReplyTimeoutMs = 20;
+    config.motorMaximumConsecutiveFailures = 3;
 
     // 【极其重要】motorEnabled=true时这里也必须改true，程序才允许启动。
     // 它会把启动瞬间的当前位置清为0；此时水管必须真实水平且未顶机械限位。

@@ -61,7 +61,7 @@ AppConfig makePdiConfig()
     config.task3BreakawayDelaySeconds = 0.08;
     config.task3BreakawayRampDegPerSecond = 0.80;
     config.task3MoveRightBreakawayMaximumAngleDeg = 0.16;
-    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.22;
+    config.task3MoveLeftBreakawayMaximumAngleDeg = 0.28;
     config.task3MoveRightOutputAngleLimitDeg = 0.75;
     config.task3MoveLeftOutputAngleLimitDeg = 0.40;
     return config;
@@ -176,8 +176,8 @@ void testPdiMotionController()
             Task3Phase::MoveToNegative, 20.0, 0.0, 0.02);
     }
     assert(leftStuckCommand.breakawayActive);
-    assert(std::abs(leftStuckCommand.breakawayAngleDeg - 0.22) < 1e-9);
-    assert(std::abs(leftStuckCommand.angleDeg - 0.62) < 1e-9);
+    assert(std::abs(leftStuckCommand.breakawayAngleDeg - 0.28) < 1e-9);
+    assert(std::abs(leftStuckCommand.angleDeg - 0.68) < 1e-9);
 
     // Hold must still overcome linkage play if the ball drifts well outside
     // the final I window after the sequence has reported completion.
@@ -188,7 +188,7 @@ void testPdiMotionController()
             Task3Phase::HoldNegative, 2.5, 0.0, 0.02);
     }
     assert(holdStuckCommand.breakawayActive);
-    assert(std::abs(holdStuckCommand.breakawayAngleDeg - 0.22) < 1e-9);
+    assert(std::abs(holdStuckCommand.breakawayAngleDeg - 0.28) < 1e-9);
     assert(holdStuckCommand.angleDeg >
            holdStuckCommand.proportionalAngleDeg);
 }

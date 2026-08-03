@@ -316,6 +316,22 @@ void testSmallTargetWithIntegerRpmZdtFeedback()
     assert(std::abs(physicalSpeedRpm) < 1.0);
 }
 
+void testSubPulsePositionErrorIsNotDiscarded()
+{
+    AppConfig config;
+    config.pulsesPerRevolution = 200;
+    config.motorRpm = 6;
+    config.motorPositionKpRpmPerStep = 0.72;
+    config.motorPositionToleranceSteps = 0.35;
+
+    VelocityModePositionController controller(config);
+    const MotorLoopTelemetry state = controller.update(
+        3, 2.3, 0.0, 0.02);
+    assert(std::abs(state.positionErrorSteps - 0.7) < 1e-9);
+    assert(state.targetSpeedRpm > 0.0);
+    assert(!state.atTarget);
+}
+
 } // namespace
 
 int main()
@@ -329,6 +345,7 @@ int main()
     testSmallPipeAngleTarget();
     testLowSpeedFeedbackWithIntegerRpmProtocol();
     testSmallTargetWithIntegerRpmZdtFeedback();
+    testSubPulsePositionErrorIsNotDiscarded();
     std::puts("motor velocity controller tests passed");
     return 0;
 }

@@ -107,7 +107,7 @@ struct AppConfig {
     double task3BreakawayDelaySeconds = 0.08;
     double task3BreakawayRampDegPerSecond = 0.80;
     double task3MoveRightBreakawayMaximumAngleDeg = 0.16;
-    double task3MoveLeftBreakawayMaximumAngleDeg = 0.22;
+    double task3MoveLeftBreakawayMaximumAngleDeg = 0.28;
 
     // These are directional safety/output scales, never fixed travel commands.
     // The PDI sum is continuously calculated and clamped to this asymmetric
@@ -148,7 +148,7 @@ struct AppConfig {
     double motorMaximumJerkRpmS3 = 600.0;
     // 制动速度上限v=sqrt(2as)使用更保守的等效减速度，补偿跃度建立时间。
     double motorBrakingAccelerationRpmS = 40.0;
-    double motorPositionToleranceSteps = 1.5;
+    double motorPositionToleranceSteps = 0.35;
     double motorStopSpeedRpm = 1.5;
     // Emm V5 0x35 reports integer RPM.  Below 1 RPM, use 0x36 encoder-position
     // changes to estimate a filtered motor speed for the inner loop.
@@ -157,6 +157,7 @@ struct AppConfig {
     // 当前位置在启动时清零，所以软限位也是相对水平零位的正负脉冲范围。
     int motorSoftLimitSteps = 130;
     int motorReplyTimeoutMs = 15;
+    int motorMaximumConsecutiveFailures = 3;
     bool motorExpectCommandAck = true;
 
     // true表示启动时把“当前电机位置”清为绝对0脉冲。
@@ -420,7 +421,9 @@ inline bool validateConfig(const AppConfig& config)
         config.motorEncoderSpeedFilterSeconds > 0.5 ||
         config.motorSoftLimitSteps < 1 ||
         config.motorReplyTimeoutMs < 2 ||
-        config.motorReplyTimeoutMs > 100) {
+        config.motorReplyTimeoutMs > 100 ||
+        config.motorMaximumConsecutiveFailures < 1 ||
+        config.motorMaximumConsecutiveFailures > 20) {
         std::fprintf(stderr, "invalid ZDT motor parameter\n");
         return false;
     }

@@ -625,6 +625,7 @@ inline int runTask3App(const AppConfig& config)
     if (armed) task3.start(secondsNow());
     bool hadMeasurement = false;
     bool communicationOk = true;
+    int motorCommunicationFailureCount = 0;
     int centerReadyFrames = 0;
     double targetCm = task3.targetCm();
     double positionCm = 0.0;
@@ -731,19 +732,35 @@ inline int runTask3App(const AppConfig& config)
         // 运行位置、速度、加速度和跃度限制后发送0xF6速度命令。
         if (commander) {
             if (!commander->update(motorSteps, millisecondsNow())) {
-                std::fprintf(stderr,
-                    "ZDT velocity feedback/command failed; stopping control loop\n");
+                ++motorCommunicationFailureCount;
                 diagnostics.write(
-                    "ERROR ZDT cycle failed tgt=%d actual=%.1f rpm=%.1f "
-                    "cmd=%.1f wire=%.1f",
+                    "WARN ZDT cycle failed count=%d/%d tgt=%d actual=%.1f "
+                    "rpm=%.1f cmd=%.1f wire=%.1f",
+                    motorCommunicationFailureCount,
+                    config.motorMaximumConsecutiveFailures,
                     motorSteps, motorTelemetry.actualSteps,
                     motorTelemetry.actualSpeedRpm,
                     motorTelemetry.commandSpeedRpm,
                     motorTelemetry.wireCommandSpeedRpm);
-                communicationOk = false;
-                running.store(false);
+                if (motorCommunicationFailureCount >=
+                    config.motorMaximumConsecutiveFailures) {
+                    std::fprintf(stderr,
+                        "ZDT communication failed %d consecutive cycles; "
+                        "stopping control loop\n",
+                        motorCommunicationFailureCount);
+                    diagnostics.write(
+                        "ERROR ZDT consecutive failure limit reached");
+                    communicationOk = false;
+                    running.store(false);
+                }
             } else {
                 motorTelemetry = commander->telemetry();
+                if (motorCommunicationFailureCount > 0) {
+                    diagnostics.write(
+                        "EVENT ZDT communication recovered after %d failure(s)",
+                        motorCommunicationFailureCount);
+                    motorCommunicationFailureCount = 0;
+                }
             }
         }
 
