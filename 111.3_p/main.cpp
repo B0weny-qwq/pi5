@@ -160,16 +160,16 @@ ball_stepper::AppConfig makeUserConfig()
     // measured linkage needs much more rightward authority, so the two P gains
     // are intentionally different. These remain feedback gains, not fixed
     // travel angles.
-    config.task3MoveRightPositionKpDegPerCm = 0.300;
-    config.task3MoveLeftPositionKpDegPerCm = 0.035;
+    config.task3MoveRightPositionKpDegPerCm = 0.350;
+    config.task3MoveLeftPositionKpDegPerCm = 0.080;
     config.task3VelocityKdDegPerCmS = 0.040;
 
     // I opens only during the slower final 3 cm. Its maximum output is
-    // 0.300 * 1.10 = 0.330 deg and every target reversal clears it.
-    config.task3IntegralKiDegPerCmSecond = 0.300;
+    // 0.400 * 1.00 = 0.400 deg and every target reversal clears it.
+    config.task3IntegralKiDegPerCmSecond = 0.400;
     config.task3IntegralZoneCm = 3.00;
     config.task3IntegralSpeedLimitCmS = 0.8;
-    config.task3IntegralLimitCmSeconds = 1.10;
+    config.task3IntegralLimitCmSeconds = 1.00;
 
     // Breakaway overlaps the final I window, avoiding the old 0.5-1.0 cm gap
     // where neither compensation was active. It decays as soon as motion is
@@ -178,14 +178,14 @@ ball_stepper::AppConfig makeUserConfig()
     config.task3BreakawaySpeedCmS = 0.35;
     config.task3BreakawayDelaySeconds = 0.08;
     config.task3BreakawayRampDegPerSecond = 0.80;
-    config.task3MoveRightBreakawayMaximumAngleDeg = 0.16;
+    config.task3MoveRightBreakawayMaximumAngleDeg = 0.11;
     config.task3MoveLeftBreakawayMaximumAngleDeg = 0.28;
 
-    // Asymmetric PDI saturation. Rightward motion can reach -0.75 deg normally
+    // Asymmetric PDI saturation. Rightward motion can reach -0.80 deg normally
     // and -0.91 deg only when feedback confirms a stall. Leftward motion is
-    // limited to +0.40/+0.68 deg; the extra range is feedback-triggered only.
-    config.task3MoveRightOutputAngleLimitDeg = 0.75;
-    config.task3MoveLeftOutputAngleLimitDeg = 0.40;
+    // limited to +0.60/+0.88 deg; the extra range is feedback-triggered only.
+    config.task3MoveRightOutputAngleLimitDeg = 0.80;
+    config.task3MoveLeftOutputAngleLimitDeg = 0.60;
 
     // v[n] = (x[n] - x[n-2]) / (t[n] - t[n-2]); low-pass only removes vision
     // jitter after that two-frame difference.
@@ -193,7 +193,7 @@ ball_stepper::AppConfig makeUserConfig()
     config.speedFilterSeconds = 0.020;
 
     config.maximumPipeAngleDeg = 0.91;
-    config.angleSlewDegS = 3.0;
+    config.angleSlewDegS = 8.0;
 
     // ---------------- 5. 曲柄连杆尺寸 ----------------
     // 【必须实测】电机输出轴中心到实际使用曲柄孔中心的距离，不是圆盘直径。

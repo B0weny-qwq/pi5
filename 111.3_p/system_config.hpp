@@ -88,15 +88,15 @@ struct AppConfig {
     // error = position - target. Negative pipe angle moves the ball right;
     // positive pipe angle moves it left. The linkage is not symmetric, so P,
     // the normal output limit, and breakaway authority are tuned per direction.
-    double task3MoveRightPositionKpDegPerCm = 0.300;
-    double task3MoveLeftPositionKpDegPerCm = 0.035;
+    double task3MoveRightPositionKpDegPerCm = 0.350;
+    double task3MoveLeftPositionKpDegPerCm = 0.080;
     double task3VelocityKdDegPerCmS = 0.040;
     // I is active only near either target.  It is reset whenever the target
     // changes and is capped by the two values below.
-    double task3IntegralKiDegPerCmSecond = 0.300;
+    double task3IntegralKiDegPerCmSecond = 0.400;
     double task3IntegralZoneCm = 3.00;
     double task3IntegralSpeedLimitCmS = 0.8;
-    double task3IntegralLimitCmSeconds = 1.10;
+    double task3IntegralLimitCmSeconds = 1.00;
 
     // If a large position error remains while the measured ball speed stays
     // near zero, slowly add a bounded breakaway angle.  This compensates
@@ -106,18 +106,18 @@ struct AppConfig {
     double task3BreakawaySpeedCmS = 0.35;
     double task3BreakawayDelaySeconds = 0.08;
     double task3BreakawayRampDegPerSecond = 0.80;
-    double task3MoveRightBreakawayMaximumAngleDeg = 0.16;
+    double task3MoveRightBreakawayMaximumAngleDeg = 0.11;
     double task3MoveLeftBreakawayMaximumAngleDeg = 0.28;
 
     // These are directional safety/output scales, never fixed travel commands.
     // The PDI sum is continuously calculated and clamped to this asymmetric
     // interval: [-moveRightLimit, +moveLeftLimit].
-    double task3MoveRightOutputAngleLimitDeg = 0.75;
-    double task3MoveLeftOutputAngleLimitDeg = 0.40;
+    double task3MoveRightOutputAngleLimitDeg = 0.80;
+    double task3MoveLeftOutputAngleLimitDeg = 0.60;
     double speedFilterSeconds = 0.020;
     int speedDifferenceFrames = 2;
     double maximumPipeAngleDeg = 1.0;
-    double angleSlewDegS = 10.0;
+    double angleSlewDegS = 8.0;
 
     // ---------------- 曲柄连杆与脉冲换算 ----------------
     double crankRadiusMm = 15.0;

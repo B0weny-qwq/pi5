@@ -49,21 +49,21 @@ void testSequence()
 AppConfig makePdiConfig()
 {
     AppConfig config;
-    config.task3MoveRightPositionKpDegPerCm = 0.300;
-    config.task3MoveLeftPositionKpDegPerCm = 0.035;
+    config.task3MoveRightPositionKpDegPerCm = 0.350;
+    config.task3MoveLeftPositionKpDegPerCm = 0.080;
     config.task3VelocityKdDegPerCmS = 0.040;
-    config.task3IntegralKiDegPerCmSecond = 0.300;
+    config.task3IntegralKiDegPerCmSecond = 0.400;
     config.task3IntegralZoneCm = 3.00;
     config.task3IntegralSpeedLimitCmS = 0.8;
-    config.task3IntegralLimitCmSeconds = 1.10;
+    config.task3IntegralLimitCmSeconds = 1.00;
     config.task3BreakawayErrorCm = 0.35;
     config.task3BreakawaySpeedCmS = 0.35;
     config.task3BreakawayDelaySeconds = 0.08;
     config.task3BreakawayRampDegPerSecond = 0.80;
-    config.task3MoveRightBreakawayMaximumAngleDeg = 0.16;
+    config.task3MoveRightBreakawayMaximumAngleDeg = 0.11;
     config.task3MoveLeftBreakawayMaximumAngleDeg = 0.28;
-    config.task3MoveRightOutputAngleLimitDeg = 0.75;
-    config.task3MoveLeftOutputAngleLimitDeg = 0.40;
+    config.task3MoveRightOutputAngleLimitDeg = 0.80;
+    config.task3MoveLeftOutputAngleLimitDeg = 0.60;
     return config;
 }
 
@@ -76,17 +76,17 @@ void testPdiMotionController()
     const Task3MotionCommand positiveStart = controller.update(
         Task3Phase::MoveToPositive, -5.0, 0.0, 0.01);
     assert(positiveStart.mode == Task3MotionMode::TrackingPd);
-    assert(std::abs(positiveStart.proportionalAngleDeg + 1.50) < 1e-9);
-    assert(std::abs(positiveStart.angleDeg + 0.75) < 1e-9);
-    assert(std::abs(positiveStart.baseOutputLimitDeg - 0.75) < 1e-9);
+    assert(std::abs(positiveStart.proportionalAngleDeg + 1.75) < 1e-9);
+    assert(std::abs(positiveStart.angleDeg + 0.80) < 1e-9);
+    assert(std::abs(positiveStart.baseOutputLimitDeg - 0.80) < 1e-9);
 
     // At the same position error, greater rightward speed increases a positive
     // D term and reduces the rightward drive before the ball reaches +5.
     const Task3MotionCommand positiveFast = controller.update(
         Task3Phase::MoveToPositive, -1.5, 5.0, 0.01);
-    assert(std::abs(positiveFast.proportionalAngleDeg + 0.45) < 1e-9);
+    assert(std::abs(positiveFast.proportionalAngleDeg + 0.525) < 1e-9);
     assert(std::abs(positiveFast.derivativeAngleDeg - 0.20) < 1e-9);
-    assert(std::abs(positiveFast.angleDeg + 0.25) < 1e-9);
+    assert(std::abs(positiveFast.angleDeg + 0.325) < 1e-9);
 
     // Equal position-error magnitudes intentionally produce different P terms
     // because the measured mechanism requires more authority to move right.
@@ -96,16 +96,16 @@ void testPdiMotionController()
         Task3Phase::MoveToPositive, -2.0, 0.0, 0.01);
     const Task3MotionCommand equalErrorLeft = leftController.update(
         Task3Phase::MoveToNegative, 2.0, 0.0, 0.01);
-    assert(std::abs(equalErrorRight.proportionalAngleDeg + 0.60) < 1e-9);
-    assert(std::abs(equalErrorLeft.proportionalAngleDeg - 0.07) < 1e-9);
+    assert(std::abs(equalErrorRight.proportionalAngleDeg + 0.70) < 1e-9);
+    assert(std::abs(equalErrorLeft.proportionalAngleDeg - 0.16) < 1e-9);
     assert(std::abs(equalErrorRight.angleDeg) >
            3.0 * std::abs(equalErrorLeft.angleDeg));
 
     // The 10 cm return target step stays below the independent +0.40 deg limit.
     const Task3MotionCommand returnStart = controller.update(
         Task3Phase::MoveToNegative, 10.0, 0.0, 0.01);
-    assert(std::abs(returnStart.angleDeg - 0.35) < 1e-9);
-    assert(std::abs(returnStart.baseOutputLimitDeg - 0.40) < 1e-9);
+    assert(std::abs(returnStart.angleDeg - 0.60) < 1e-9);
+    assert(std::abs(returnStart.baseOutputLimitDeg - 0.60) < 1e-9);
 
     // When the ball is moving left faster, D becomes more negative and turns
     // the pipe toward braking without a separate braking mode or fixed angle.
@@ -137,7 +137,7 @@ void testPdiMotionController()
     assert(finalCommand.mode == Task3MotionMode::HoldPdi);
     assert(finalCommand.integralWindowActive);
     assert(finalCommand.integralAngleDeg > 0.0);
-    assert(finalCommand.integralAngleDeg < 0.34 + 1e-9);
+    assert(finalCommand.integralAngleDeg < 0.41 + 1e-9);
     assert(finalCommand.angleDeg > finalCommand.proportionalAngleDeg);
 
     const Task3MotionCommand outsideIntegralWindow = controller.update(
@@ -152,8 +152,8 @@ void testPdiMotionController()
             Task3Phase::MoveToNegative, 1.9, 0.0, 0.10);
     }
     assert(residualCommand.integralWindowActive);
-    assert(residualCommand.integralAngleDeg > 0.32);
-    assert(residualCommand.integralAngleDeg <= 0.33 + 1e-9);
+    assert(residualCommand.integralAngleDeg > 0.39);
+    assert(residualCommand.integralAngleDeg <= 0.40 + 1e-9);
 
     // A large error with no measured ball response gradually expands the
     // output beyond the normal PD limit.  It is feedback-triggered and decays
@@ -187,7 +187,7 @@ void testPdiMotionController()
     }
     assert(leftStuckCommand.breakawayActive);
     assert(std::abs(leftStuckCommand.breakawayAngleDeg - 0.28) < 1e-9);
-    assert(std::abs(leftStuckCommand.angleDeg - 0.68) < 1e-9);
+    assert(std::abs(leftStuckCommand.angleDeg - 0.88) < 1e-9);
 
     // Hold must still overcome linkage play if the ball drifts well outside
     // the final I window after the sequence has reported completion.
