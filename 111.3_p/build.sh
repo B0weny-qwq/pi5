@@ -44,9 +44,14 @@ g++ -O2 "${common_flags[@]}" task3_sequence_test.cpp \
     -o task3_sequence_test "${opencv_flags[@]}"
 ./task3_sequence_test
 
+# SSH手动调试工具只在显式调用时打开UART，不在构建阶段运行。
+g++ -O2 "${common_flags[@]}" motor_cli.cpp \
+    -o motor_cli "${opencv_flags[@]}"
+
 # 测试通过后才生成比赛正式程序，避免误运行旧二进制文件。
 g++ -O3 -DNDEBUG "${common_flags[@]}" main.cpp \
     -o ball2_task3_velocity "${opencv_flags[@]}"
 
 echo "Build complete: ./ball2_task3_velocity"
+echo "Manual motor CLI: ./motor_cli --help"
 echo "  ZDT: 0xF6 velocity mode + 0x35 speed + 0x30 pulse position"

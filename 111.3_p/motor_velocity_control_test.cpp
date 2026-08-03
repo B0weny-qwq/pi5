@@ -27,6 +27,31 @@ void testVelocityFrame()
     assert(precise[5] == 0x00 && precise[6] == 0x04);
 }
 
+void testTrapezoidalRelativeFrame()
+{
+    const auto frame = makeZdtTrapezoidalRelativeFrame(
+        0x01, -5.0, 6.0, 200, 200);
+    const std::array<uint8_t, 16> expected = {
+        0x01, 0xFD, 0x01,
+        0x00, 0xC8,
+        0x00, 0xC8,
+        0x00, 0x3C,
+        0x00, 0x00, 0x00, 0x32,
+        0x00, 0x00, 0x6B
+    };
+    assert(frame == expected);
+
+    const auto positive = makeZdtTrapezoidalRelativeFrame(
+        0x02, 5.0, 6.0, 200, 150);
+    assert(positive[0] == 0x02);
+    assert(positive[2] == 0x00);
+    assert(positive[5] == 0x00 && positive[6] == 0x96);
+    assert(positive[9] == 0x00 && positive[10] == 0x00 &&
+           positive[11] == 0x00 && positive[12] == 0x32);
+    assert(positive[13] == 0x00 && positive[14] == 0x00 &&
+           positive[15] == 0x6B);
+}
+
 void simulateToTarget(VelocityModePositionController& controller,
                       const AppConfig& config,
                       int targetSteps,
@@ -215,6 +240,7 @@ void testSmallTargetWithDeciRpmZdtFeedback()
 int main()
 {
     testVelocityFrame();
+    testTrapezoidalRelativeFrame();
     testCascadedController();
     testSmallPipeAngleTarget();
     testLowSpeedFeedbackAndDeciRpmProtocol();

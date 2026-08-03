@@ -26,10 +26,12 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <thread>
 
 #if defined(__linux__) || defined(BALL_STEPPER_SYNTAX_CHECK)
 #include <fcntl.h>
+#include <sys/file.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -38,6 +40,11 @@ namespace ball_stepper {
 
 inline constexpr uint8_t ZDT_TAIL = 0x6B;
 inline constexpr double ZDT_SPEED_UNITS_PER_RPM = 10.0;
+inline constexpr double ZDT_ANGLE_UNITS_PER_DEGREE = 10.0;
+inline constexpr uint8_t ZDT_STATUS_ENABLED = 0x01;
+inline constexpr uint8_t ZDT_STATUS_ARRIVED = 0x02;
+inline constexpr uint8_t ZDT_STATUS_STALL = 0x04;
+inline constexpr uint8_t ZDT_STATUS_STALL_PROTECTION = 0x08;
 
 inline std::array<uint8_t, 9> makeZdtVelocityFrame(
     uint8_t address,
@@ -64,16 +71,73 @@ inline std::array<uint8_t, 9> makeZdtVelocityFrame(
     };
 }
 
+inline std::array<uint8_t, 16> makeZdtTrapezoidalRelativeFrame(
+    uint8_t address,
+    double signedDegrees,
+    double maximumRpm,
+    uint16_t accelerationRpmS,
+    uint16_t decelerationRpmS)
+{
+    const double maximumDegrees =
+        static_cast<double>(std::numeric_limits<uint32_t>::max()) /
+        ZDT_ANGLE_UNITS_PER_DEGREE;
+    const double limitedDegrees = std::clamp(
+        signedDegrees, -maximumDegrees, maximumDegrees);
+    const uint32_t magnitudeDeciDegrees = static_cast<uint32_t>(
+        std::llround(std::abs(limitedDegrees) *
+                     ZDT_ANGLE_UNITS_PER_DEGREE));
+    const double limitedRpm = std::clamp(maximumRpm, 0.1, 3000.0);
+    const uint16_t magnitudeDeciRpm = static_cast<uint16_t>(std::lround(
+        limitedRpm * ZDT_SPEED_UNITS_PER_RPM));
+
+    return {
+        address,
+        0xFD,
+        limitedDegrees >= 0.0 ? uint8_t{0x00} : uint8_t{0x01},
+        static_cast<uint8_t>((accelerationRpmS >> 8) & 0xFF),
+        static_cast<uint8_t>(accelerationRpmS & 0xFF),
+        static_cast<uint8_t>((decelerationRpmS >> 8) & 0xFF),
+        static_cast<uint8_t>(decelerationRpmS & 0xFF),
+        static_cast<uint8_t>((magnitudeDeciRpm >> 8) & 0xFF),
+        static_cast<uint8_t>(magnitudeDeciRpm & 0xFF),
+        static_cast<uint8_t>((magnitudeDeciDegrees >> 24) & 0xFF),
+        static_cast<uint8_t>((magnitudeDeciDegrees >> 16) & 0xFF),
+        static_cast<uint8_t>((magnitudeDeciDegrees >> 8) & 0xFF),
+        static_cast<uint8_t>(magnitudeDeciDegrees & 0xFF),
+        0x00,
+        0x00,
+        ZDT_TAIL
+    };
+}
+
 #if defined(__linux__) || defined(BALL_STEPPER_SYNTAX_CHECK)
 
 class SerialPort {
     int fileDescriptor_ = -1;
+    int lockDescriptor_ = -1;
 
 public:
     ~SerialPort() { closePort(); }
 
     bool openPort(const std::string& device, int baud)
     {
+        closePort();
+
+        lockDescriptor_ = ::open(
+            "/tmp/ball_stepper_zdt_uart.lock", O_CREAT | O_RDWR, 0666);
+        if (lockDescriptor_ < 0) {
+            std::fprintf(stderr, "open UART lock failed: %s\n",
+                         std::strerror(errno));
+            return false;
+        }
+        if (::flock(lockDescriptor_, LOCK_EX | LOCK_NB) != 0) {
+            std::fprintf(stderr,
+                "ZDT UART is busy; stop the main controller or other motor_cli first\n");
+            ::close(lockDescriptor_);
+            lockDescriptor_ = -1;
+            return false;
+        }
+
         fileDescriptor_ = ::open(
             device.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
         if (fileDescriptor_ < 0) {
@@ -125,6 +189,11 @@ public:
         if (fileDescriptor_ >= 0) {
             ::close(fileDescriptor_);
             fileDescriptor_ = -1;
+        }
+        if (lockDescriptor_ >= 0) {
+            ::flock(lockDescriptor_, LOCK_UN);
+            ::close(lockDescriptor_);
+            lockDescriptor_ = -1;
         }
     }
 
@@ -330,13 +399,18 @@ public:
           replyTimeoutMs_(config.motorReplyTimeoutMs),
           expectCommandAck_(config.motorExpectCommandAck) {}
 
-    bool enable()
+    bool setEnabled(bool enabled)
     {
         const uint8_t frame[] = {
-            address_, 0xF3, 0xAB, 0x01, 0x00, ZDT_TAIL
+            address_, 0xF3, 0xAB,
+            enabled ? uint8_t{0x01} : uint8_t{0x00},
+            0x00, ZDT_TAIL
         };
         return sendControlCommand(frame, sizeof(frame), 0xF3);
     }
+
+    bool enable() { return setEnabled(true); }
+    bool disable() { return setEnabled(false); }
 
     bool stop()
     {
@@ -370,6 +444,17 @@ public:
             address_, quantizeVelocityRpm(signedRpm), maximumRpm_,
             speedSlopeRpmS_);
         return sendControlCommand(frame.data(), frame.size(), 0xF6);
+    }
+
+    bool moveRelativeDegrees(double signedDegrees,
+                             double maximumRpm,
+                             uint16_t accelerationRpmS,
+                             uint16_t decelerationRpmS)
+    {
+        const auto frame = makeZdtTrapezoidalRelativeFrame(
+            address_, signedDegrees, maximumRpm,
+            accelerationRpmS, decelerationRpmS);
+        return sendControlCommand(frame.data(), frame.size(), 0xFD);
     }
 
     bool readRealtimeSpeedRpm(double& signedRpm)
