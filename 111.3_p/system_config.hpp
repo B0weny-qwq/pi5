@@ -87,12 +87,22 @@ struct AppConfig {
     // estimated from the current detection and the detection two frames ago.
     double task3PositionKpDegPerCm = 0.070;
     double task3VelocityKdDegPerCmS = 0.020;
-    // I is active only near the final -5 cm target.  Its output is capped by
-    // task3IntegralLimitCmSeconds * task3IntegralKiDegPerCmSecond.
+    // I is active only near either target.  It is reset whenever the target
+    // changes and is capped by the two values below.
     double task3IntegralKiDegPerCmSecond = 0.120;
     double task3IntegralZoneCm = 0.50;
     double task3IntegralSpeedLimitCmS = 1.0;
     double task3IntegralLimitCmSeconds = 0.75;
+
+    // If a large position error remains while the measured ball speed stays
+    // near zero, slowly add a bounded breakaway angle.  This compensates
+    // linkage play and static friction from feedback instead of hard-coding a
+    // minimum motor angle.  The term decays as soon as the ball responds.
+    double task3BreakawayErrorCm = 1.0;
+    double task3BreakawaySpeedCmS = 0.35;
+    double task3BreakawayDelaySeconds = 0.12;
+    double task3BreakawayRampDegPerSecond = 0.50;
+    double task3BreakawayMaximumAngleDeg = 0.15;
 
     // This is a limiter, not a commanded travel angle.  0.35 deg matches the
     // previous verified O -> O+5 peak amplitude while P and D set every value.
@@ -117,8 +127,8 @@ struct AppConfig {
     std::string serialPort = "/dev/serial0";
     int serialBaud = 115200;
     int motorAddress = 1;
-    // 0xF6 uses a 16-bit speed slope in RPM/s, not an acceleration slot.
-    // Keep it at or above the software acceleration limit.
+    // Physical acceleration request.  The Emm V5 layer converts RPM/s to its
+    // 0-255 acceleration slot before sending 0xF6.
     int motorRpm = 8;
     int motorSpeedSlopeRpmS = 60;
     int motorCommandHz = 30;
@@ -133,8 +143,8 @@ struct AppConfig {
     double motorBrakingAccelerationRpmS = 40.0;
     double motorPositionToleranceSteps = 1.5;
     double motorStopSpeedRpm = 1.5;
-    // 0x35 reports speed in 0.1 RPM units. Below 0.1 RPM, use 0x30 pulse
-    // position changes to estimate a filtered motor speed for the inner loop.
+    // Emm V5 0x35 reports integer RPM.  Below 1 RPM, use 0x36 encoder-position
+    // changes to estimate a filtered motor speed for the inner loop.
     double motorEncoderSpeedFilterSeconds = 0.04;
 
     // 当前位置在启动时清零，所以软限位也是相对水平零位的正负脉冲范围。
@@ -144,6 +154,15 @@ struct AppConfig {
 
     // true表示启动时把“当前电机位置”清为绝对0脉冲。
     // 只有水管已经真实水平、机构没有顶限位时才允许设为true。
+    // Preferred startup path: return to the persistent single-turn absolute
+    // encoder origin before defining the runtime 0x36 position as zero.
+    bool absoluteEncoderHomeOnStart = false;
+    int absoluteEncoderHomeRpm = 6;
+    int absoluteEncoderHomeTimeoutMs = 5000;
+    int absoluteEncoderHomePollMs = 40;
+
+    // Legacy path. This declares the arbitrary startup position to be zero and
+    // must not be enabled together with absoluteEncoderHomeOnStart.
     bool zeroOnStart = false;
 
     // ZDT启动/清零/退出时的等待时间。通常不改，电机很慢时可适当增加退出等待。
@@ -172,10 +191,10 @@ struct AppConfig {
     // ---------------- E611网络图传 ----------------
     // 视觉仍按cameraFps处理；这里只对叠加后的显示画面限帧、编码并通过UDP发送。
     bool videoStreamEnabled = false;
-    std::string videoStreamHost = "192.168.50.1";
+    std::string videoStreamHost = "192.168.137.1";
     int videoStreamPort = 5600;
     int videoStreamFps = 30;
-    int videoStreamBitrateKbps = 4000;
+    int videoStreamBitrateKbps = 1000;
 };
 
 using ControlClock = std::chrono::steady_clock;
@@ -303,13 +322,25 @@ inline bool validateConfig(const AppConfig& config)
         config.task3IntegralSpeedLimitCmS <= 0.0 ||
         !std::isfinite(config.task3IntegralLimitCmSeconds) ||
         config.task3IntegralLimitCmSeconds <= 0.0 ||
+        !std::isfinite(config.task3BreakawayErrorCm) ||
+        config.task3BreakawayErrorCm <= 0.0 ||
+        !std::isfinite(config.task3BreakawaySpeedCmS) ||
+        config.task3BreakawaySpeedCmS <= 0.0 ||
+        !std::isfinite(config.task3BreakawayDelaySeconds) ||
+        config.task3BreakawayDelaySeconds < 0.0 ||
+        !std::isfinite(config.task3BreakawayRampDegPerSecond) ||
+        config.task3BreakawayRampDegPerSecond <= 0.0 ||
+        !std::isfinite(config.task3BreakawayMaximumAngleDeg) ||
+        config.task3BreakawayMaximumAngleDeg < 0.0 ||
         !std::isfinite(config.task3OutputAngleLimitDeg) ||
         config.task3OutputAngleLimitDeg <= 0.0 ||
         config.speedFilterSeconds < 0.005 ||
         config.speedDifferenceFrames != 2 ||
         config.maximumPipeAngleDeg <= 0.0 ||
         config.maximumPipeAngleDeg > 10.0 ||
-        config.task3OutputAngleLimitDeg > config.maximumPipeAngleDeg ||
+        config.task3OutputAngleLimitDeg +
+                config.task3BreakawayMaximumAngleDeg >
+            config.maximumPipeAngleDeg ||
         config.angleSlewDegS <= 0.0) {
         std::fprintf(stderr, "invalid TASK 3 PDI or angle-limit parameter\n");
         return false;
@@ -386,9 +417,25 @@ inline bool validateConfig(const AppConfig& config)
         std::fprintf(stderr, "motor enabled but serialPort is empty\n");
         return false;
     }
-    if (config.motorEnabled && !config.zeroOnStart) {
+    if (config.absoluteEncoderHomeOnStart && config.zeroOnStart) {
         std::fprintf(stderr,
-            "motor mode requires zeroOnStart=true after the pipe is level\n");
+            "absolute homing and legacy zeroOnStart cannot both be enabled\n");
+        return false;
+    }
+    if (config.motorEnabled && !config.absoluteEncoderHomeOnStart &&
+        !config.zeroOnStart) {
+        std::fprintf(stderr,
+            "motor mode requires absolute homing or explicit legacy zeroing\n");
+        return false;
+    }
+    if (config.absoluteEncoderHomeOnStart &&
+        (config.absoluteEncoderHomeRpm < 1 ||
+         config.absoluteEncoderHomeRpm > config.motorRpm ||
+         config.absoluteEncoderHomeTimeoutMs < 200 ||
+         config.absoluteEncoderHomeTimeoutMs > 60000 ||
+         config.absoluteEncoderHomePollMs < 10 ||
+         config.absoluteEncoderHomePollMs > 500)) {
+        std::fprintf(stderr, "invalid absolute encoder homing parameter\n");
         return false;
     }
     if (!config.gui && !config.terminalKeys &&

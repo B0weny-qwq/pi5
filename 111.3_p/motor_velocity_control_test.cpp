@@ -79,6 +79,46 @@ void testDriverParameterResponse()
     assert(!decodeZdtDriverParametersResponse(invalid, 0x01, parameters));
 }
 
+void testAbsoluteHomingProtocol()
+{
+    ZdtHomingParameters parameters;
+    parameters.mode = ZdtHomingMode::Nearest;
+    parameters.direction = 0x00;
+    parameters.velocityRpm = 6;
+    parameters.timeoutMs = 5000;
+    parameters.sensorlessSpeedRpm = 4000;
+    parameters.sensorlessCurrentMilliamps = 800;
+    parameters.sensorlessTimeMs = 60;
+    parameters.powerOnAutomatic = false;
+
+    const auto frame = makeEmmV5HomingParametersFrame(
+        0x01, parameters, true);
+    const std::array<uint8_t, 20> expectedFrame = {
+        0x01, 0x4C, 0xAE, 0x01, 0x00, 0x00, 0x00, 0x06,
+        0x00, 0x00, 0x13, 0x88, 0x0F, 0xA0, 0x03, 0x20,
+        0x00, 0x3C, 0x00, 0x6B
+    };
+    assert(frame == expectedFrame);
+
+    const std::array<uint8_t, 18> response = {
+        0x01, 0x22, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00,
+        0x13, 0x88, 0x0F, 0xA0, 0x03, 0x20, 0x00, 0x3C,
+        0x00, 0x6B
+    };
+    ZdtHomingParameters decoded;
+    assert(decodeEmmV5HomingParametersResponse(response, 0x01, decoded));
+    assert(decoded.mode == ZdtHomingMode::Nearest);
+    assert(decoded.velocityRpm == 6);
+    assert(decoded.timeoutMs == 5000);
+    assert(decoded.sensorlessSpeedRpm == 4000);
+    assert(decoded.sensorlessCurrentMilliamps == 800);
+    assert(decoded.sensorlessTimeMs == 60);
+    assert(!decoded.powerOnAutomatic);
+    assert(zdtResponseModeHasImmediateAck(0x01));
+    assert(zdtResponseModeHasImmediateAck(0x03));
+    assert(!zdtResponseModeHasImmediateAck(0x00));
+}
+
 void testIntegerRpmQuantizer()
 {
     VelocityCommandQuantizer quantizer;
@@ -283,6 +323,7 @@ int main()
     testVelocityFrame();
     testRelativePositionFrame();
     testDriverParameterResponse();
+    testAbsoluteHomingProtocol();
     testIntegerRpmQuantizer();
     testCascadedController();
     testSmallPipeAngleTarget();

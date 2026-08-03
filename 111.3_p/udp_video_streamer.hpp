@@ -43,11 +43,12 @@ class UdpVideoStreamer {
         std::ostringstream text;
         text << "appsrc is-live=true format=time "
              << "! queue leaky=downstream max-size-buffers=1 "
-             << "! videoconvert "
+             << "! videoconvert n-threads=2 "
              << "! video/x-raw,format=I420 "
              << "! x264enc tune=zerolatency speed-preset=ultrafast "
              << "bitrate=" << bitrateKbps_ << ' '
-             << "key-int-max=" << fps_ << " bframes=0 byte-stream=true "
+             << "key-int-max=" << fps_ << ' '
+             << "bframes=0 threads=4 sliced-threads=true byte-stream=true "
              << "! h264parse config-interval=-1 "
              << "! mpegtsmux alignment=7 "
              << "! udpsink host=" << host_ << " port=" << port_
@@ -72,7 +73,15 @@ class UdpVideoStreamer {
                 }
 
                 if (!frame.empty()) {
-                    writer_.write(frame);
+                    cv::Mat encodedFrame;
+                    if (frame.channels() == 4) {
+                        cv::cvtColor(frame, encodedFrame, cv::COLOR_BGRA2BGR);
+                    } else if (frame.channels() == 1) {
+                        cv::cvtColor(frame, encodedFrame, cv::COLOR_GRAY2BGR);
+                    } else {
+                        encodedFrame = std::move(frame);
+                    }
+                    writer_.write(encodedFrame);
                     ++sentFrames_;
                 }
             }
@@ -129,7 +138,8 @@ public:
 
         worker_ = std::thread(&UdpVideoStreamer::threadMain, this);
         std::fprintf(stderr,
-            "UDP video ready: h264/mpegts %dx%d@%d %.1f Mbps -> %s:%d\n",
+            "UDP video ready: grayscale camera with color overlays, "
+            "h264/mpegts %dx%d@%d %.1f Mbps -> %s:%d\n",
             width_, height_, fps_, bitrateKbps_ / 1000.0,
             host_.c_str(), port_);
         return true;

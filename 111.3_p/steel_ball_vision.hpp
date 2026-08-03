@@ -1372,7 +1372,7 @@ public:
 };
 
 inline void drawBall(cv::Mat& frame, const cv::Point2f& center,
-                     float radius, float confidence,
+                     float radius,
                      const cv::Scalar& color)
 {
     const cv::Point point(cvRound(center.x), cvRound(center.y));
@@ -1382,13 +1382,6 @@ inline void drawBall(cv::Mat& frame, const cv::Point2f& center,
     cv::line(frame, {point.x, point.y - 6},
              {point.x, point.y + 6}, color, 1, cv::LINE_AA);
 
-    char label[96];
-    std::snprintf(label, sizeof(label),
-                  "x=%.1f y=%.1f d=%.1f conf=%.2f",
-                  center.x, center.y, radius * 2.0f, confidence);
-    const int labelY = std::max(18, point.y - cvRound(radius) - 9);
-    cv::putText(frame, label, {std::max(2, point.x - 90), labelY},
-                cv::FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv::LINE_AA);
 }
 
 } // namespace ball_stepper

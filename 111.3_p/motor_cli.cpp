@@ -20,6 +20,9 @@ constexpr double MANUAL_MINIMUM_DEGREES = 1.0;
 constexpr double MANUAL_MAXIMUM_DEGREES = 10.0;
 constexpr double MANUAL_MAXIMUM_RPM = 6.0;
 constexpr uint16_t MANUAL_ACCELERATION_RPM_S = 200;
+constexpr uint16_t ABSOLUTE_HOME_RPM = 6;
+constexpr int ABSOLUTE_HOME_TIMEOUT_MS = 5000;
+constexpr int ABSOLUTE_HOME_POLL_MS = 40;
 constexpr int COMMAND_SETTLE_MS = 80;
 constexpr int POLL_INTERVAL_MS = 40;
 
@@ -37,7 +40,7 @@ AppConfig makeMotorConfig()
     config.serialBaud = 115200;
     config.motorAddress = 1;
     config.pulsesPerRevolution = 200;
-    config.motorSign = 1;
+    config.motorSign = -1;
     config.motorRpm = static_cast<int>(MANUAL_MAXIMUM_RPM);
     config.motorSpeedSlopeRpmS = MANUAL_ACCELERATION_RPM_S;
     config.motorReplyTimeoutMs = 30;
@@ -54,7 +57,9 @@ void printUsage(const char* program)
         "  %s up DEGREES\n"
         "  %s down DEGREES\n"
         "  %s move SIGNED_DEGREES\n"
-        "  %s zero\n"
+        "  %s origin-set\n"
+        "  %s home\n"
+        "  %s zero                 (volatile runtime coordinate only)\n"
         "  %s stop\n"
         "  %s enable\n"
         "  %s disable\n"
@@ -62,6 +67,7 @@ void printUsage(const char* program)
         "Moves are relative motor-shaft angles, limited to %.1f..%.1f degrees.\n"
         "Default motion: %.1f RPM, %u RPM/s physical acceleration.\n",
         program, program, program, program, program, program, program, program,
+        program, program,
         MANUAL_MINIMUM_DEGREES, MANUAL_MAXIMUM_DEGREES,
         MANUAL_MAXIMUM_RPM,
         static_cast<unsigned>(MANUAL_ACCELERATION_RPM_S));
@@ -121,8 +127,8 @@ bool readAndPrintDriverInfo(EmmV5Motor& motor)
         return false;
     }
 
-    const bool immediateAck = parameters.responseMode == 0x01 ||
-                              parameters.responseMode == 0x03;
+    const bool immediateAck =
+        zdtResponseModeHasImmediateAck(parameters.responseMode);
     if (!motor.configureDriverParameters(parameters)) return false;
     motor.setExpectCommandAck(immediateAck);
 
@@ -150,6 +156,98 @@ bool readAndPrintDriverInfo(EmmV5Motor& motor)
         static_cast<unsigned>(
             motor.positionCommandPulsesPerRevolution()),
         immediateAck ? 1 : 0);
+    return true;
+}
+
+void printHomingParameters(const ZdtHomingParameters& parameters)
+{
+    std::printf(
+        "home_mode=%u home_rpm=%u timeout_ms=%u power_on_auto=%d\n",
+        static_cast<unsigned>(parameters.mode),
+        static_cast<unsigned>(parameters.velocityRpm),
+        static_cast<unsigned>(parameters.timeoutMs),
+        parameters.powerOnAutomatic ? 1 : 0);
+}
+
+bool saveCurrentPositionAsAbsoluteOrigin(EmmV5Motor& motor)
+{
+    if (!motor.stop()) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    ZdtHomingParameters parameters;
+    if (!motor.readHomingParameters(parameters)) {
+        std::fprintf(stderr, "ERROR: cannot read ZDT homing parameters\n");
+        return false;
+    }
+    parameters.mode = ZdtHomingMode::Nearest;
+    parameters.velocityRpm = ABSOLUTE_HOME_RPM;
+    parameters.timeoutMs = ABSOLUTE_HOME_TIMEOUT_MS;
+    // The application triggers and monitors homing. Do not let the mechanism
+    // move immediately when driver power is applied.
+    parameters.powerOnAutomatic = false;
+    if (!motor.writeHomingParameters(parameters, true)) {
+        std::fprintf(stderr, "ERROR: cannot store ZDT homing parameters\n");
+        return false;
+    }
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(COMMAND_SETTLE_MS));
+
+    ZdtHomingParameters verified;
+    if (!motor.readHomingParameters(verified)) return false;
+    printHomingParameters(verified);
+    if (verified.mode != ZdtHomingMode::Nearest ||
+        verified.velocityRpm != ABSOLUTE_HOME_RPM ||
+        verified.timeoutMs != ABSOLUTE_HOME_TIMEOUT_MS ||
+        verified.powerOnAutomatic) {
+        std::fprintf(stderr,
+            "ERROR: driver did not retain the requested safe homing settings\n");
+        return false;
+    }
+
+    if (!motor.setSingleTurnOrigin(true)) {
+        std::fprintf(stderr,
+            "ERROR: persistent single-turn absolute origin write failed\n");
+        return false;
+    }
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(COMMAND_SETTLE_MS));
+    if (!motor.clearPosition()) {
+        std::fprintf(stderr, "ERROR: runtime position clear failed\n");
+        return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::printf(
+        "absolute_origin_saved=1 current_position_is_persistent_level_zero\n");
+    return true;
+}
+
+bool returnToAbsoluteOrigin(EmmV5Motor& motor)
+{
+    ZdtHomingParameters parameters;
+    if (!motor.readHomingParameters(parameters)) return false;
+    printHomingParameters(parameters);
+    if (parameters.mode != ZdtHomingMode::Nearest ||
+        parameters.velocityRpm != ABSOLUTE_HOME_RPM ||
+        parameters.powerOnAutomatic) {
+        std::fprintf(stderr,
+            "ERROR: unsafe homing configuration; run origin-set at LEVEL\n");
+        return false;
+    }
+    if (!motor.enable()) return false;
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(COMMAND_SETTLE_MS));
+    if (!motor.stop()) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    std::printf("absolute_home_started=1 rpm=%u\n",
+                static_cast<unsigned>(parameters.velocityRpm));
+    if (!motor.homeToStoredSingleTurnOrigin(
+            ABSOLUTE_HOME_TIMEOUT_MS, ABSOLUTE_HOME_POLL_MS)) {
+        return false;
+    }
+    if (!motor.clearPosition()) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::printf("absolute_home_completed=1 runtime_position_zeroed=1\n");
     return true;
 }
 
@@ -397,6 +495,7 @@ int main(int argc, char** argv)
         }
     } else if (argc != 2 ||
                (command != "status" && command != "zero" &&
+                command != "origin-set" && command != "home" &&
                 command != "stop" && command != "enable" &&
                 command != "disable")) {
         printUsage(argv[0]);
@@ -411,10 +510,7 @@ int main(int argc, char** argv)
     if (!serial.openPort(config.serialPort, config.serialBaud)) return 1;
     EmmV5Motor motor(serial, config);
 
-    const bool needsDriverInfo =
-        command == "status" || command == "move" ||
-        command == "up" || command == "down";
-    if (needsDriverInfo && !readAndPrintDriverInfo(motor)) return 1;
+    if (!readAndPrintDriverInfo(motor)) return 1;
 
     if (command == "move" || command == "up" || command == "down") {
         return runMove(motor, config, signedDegrees);
@@ -427,6 +523,11 @@ int main(int argc, char** argv)
         return readStatus(
             motor, config, motion, motorStatus, originStatus) ? 0 : 1;
     }
+    if (command == "origin-set") {
+        if (!saveCurrentPositionAsAbsoluteOrigin(motor)) return 1;
+    } else if (command == "home") {
+        if (!returnToAbsoluteOrigin(motor)) return 1;
+    } else
     if (command == "enable") {
         if (!motor.enable()) return 1;
         std::this_thread::sleep_for(

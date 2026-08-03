@@ -167,6 +167,15 @@ ball_stepper::AppConfig makeUserConfig()
     config.task3IntegralSpeedLimitCmS = 1.0;
     config.task3IntegralLimitCmSeconds = 0.75;
 
+    // Large error + almost zero measured ball speed means the linkage has not
+    // transferred the motor motion.  After 120 ms, increase the PDI output
+    // smoothly by at most 0.15 deg; remove it as soon as the ball responds.
+    config.task3BreakawayErrorCm = 1.0;
+    config.task3BreakawaySpeedCmS = 0.35;
+    config.task3BreakawayDelaySeconds = 0.12;
+    config.task3BreakawayRampDegPerSecond = 0.50;
+    config.task3BreakawayMaximumAngleDeg = 0.15;
+
     // Uniform outer-loop saturation.  This is a safety/output scale, never a
     // fixed travel command.  The global mechanism limit remains wider.
     config.task3OutputAngleLimitDeg = 0.35;
@@ -190,7 +199,7 @@ ball_stepper::AppConfig makeUserConfig()
     config.pulsesPerRevolution = 200;
 
     // +1表示正脉冲应使axisRight端升高；实际相反时只改成-1。
-    config.motorSign = 1;
+    config.motorSign = -1;
 
     // ---------------- 6. 水管角度到电机脉冲实测标定表 ----------------
     // 【最终实机强烈建议填写】没有标定表时使用理想曲柄公式，只适合检查思路。
@@ -213,7 +222,11 @@ ball_stepper::AppConfig makeUserConfig()
     // ---------------- 7. 树莓派GPIO14/15与ZDT串口 ----------------
     // 【第一次保持false】false只显示角度和脉冲，不打开串口、不驱动电机。
     // 轴线、方向、脉冲量和机械限位全部确认后再改为true。
+#if defined(BALL_E611_VIDEO_ONLY)
+    config.motorEnabled = false;
+#else
     config.motorEnabled = true;
+#endif
 
     // 树莓派5：GPIO14/TXD物理8脚接ZDT RX，GPIO15/RXD物理10脚接ZDT TX，GND共地。
     // 当前这台Ubuntu系统已确认GPIO14/15对应/dev/ttyAMA0，且没有/dev/serial0别名。
@@ -231,7 +244,7 @@ ball_stepper::AppConfig makeUserConfig()
     // software acceleration limit so the software trajectory remains active.
     config.motorSpeedSlopeRpmS = 200;
 
-    // Each cycle reads 0x30 pulse position and 0x35 speed, then sends 0xF6.
+    // Each cycle reads Emm V5 0x36 position and 0x35 speed, then sends 0xF6.
     config.motorCommandHz = 50;
 
     // Preserve the physical position-loop gain after changing from 6400 PPR.
@@ -262,7 +275,15 @@ ball_stepper::AppConfig makeUserConfig()
 
     // 【极其重要】motorEnabled=true时这里也必须改true，程序才允许启动。
     // 它会把启动瞬间的当前位置清为0；此时水管必须真实水平且未顶机械限位。
-    config.zeroOnStart = true;
+#if defined(BALL_E611_VIDEO_ONLY)
+    config.zeroOnStart = false;
+#else
+    config.absoluteEncoderHomeOnStart = true;
+    config.absoluteEncoderHomeRpm = 6;
+    config.absoluteEncoderHomeTimeoutMs = 5000;
+    config.absoluteEncoderHomePollMs = 40;
+    config.zeroOnStart = false;
+#endif
 
     // ---------------- 8. ZDT启动与退出等待 ----------------
     // 这些等待让驱动器有时间完成使能、停止和清零，一般保持默认。
@@ -288,7 +309,7 @@ ball_stepper::AppConfig makeUserConfig()
     config.csv = false;
     config.runtimeLogEnabled = true;
     config.runtimeLogDirectory = "logs";
-    config.runtimeLogEvent = "task3_start";
+    config.runtimeLogEvent = "task1_pdi";
     config.runtimeLogIntervalMs = 200;
 
     // 每个控制帧都提交最新预览。SSH/X11显示慢时只丢旧预览帧，
@@ -299,10 +320,10 @@ ball_stepper::AppConfig makeUserConfig()
     // H.264/MPEG-TS，通过树莓派eth0向场外电脑发送。识别仍保持120 FPS，
     // 图传独立限为30 FPS；VLC打开udp://@:5600即可显示和录像。
     config.videoStreamEnabled = true;
-    config.videoStreamHost = "192.168.50.1";
+    config.videoStreamHost = "192.168.137.1";
     config.videoStreamPort = 5600;
     config.videoStreamFps = 30;
-    config.videoStreamBitrateKbps = 4000;
+    config.videoStreamBitrateKbps = 1000;
 
     // ========================================================================
     //                       B. 系统参数修改区结束

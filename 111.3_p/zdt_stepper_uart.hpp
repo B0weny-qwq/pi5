@@ -44,6 +44,87 @@ inline constexpr uint8_t ZDT_STATUS_ENABLED = 0x01;
 inline constexpr uint8_t ZDT_STATUS_ARRIVED = 0x02;
 inline constexpr uint8_t ZDT_STATUS_STALL = 0x04;
 inline constexpr uint8_t ZDT_STATUS_STALL_PROTECTION = 0x08;
+inline constexpr uint8_t ZDT_ORIGIN_ENCODER_READY = 0x01;
+inline constexpr uint8_t ZDT_ORIGIN_CALIBRATION_READY = 0x02;
+inline constexpr uint8_t ZDT_ORIGIN_HOMING = 0x04;
+inline constexpr uint8_t ZDT_ORIGIN_FAILED = 0x08;
+
+enum class ZdtHomingMode : uint8_t {
+    Nearest = 0x00,
+    Direction = 0x01,
+    Sensorless = 0x02,
+    EndStop = 0x03
+};
+
+struct ZdtHomingParameters {
+    ZdtHomingMode mode = ZdtHomingMode::Nearest;
+    uint8_t direction = 0x00;
+    uint16_t velocityRpm = 30;
+    uint32_t timeoutMs = 10000;
+    uint16_t sensorlessSpeedRpm = 4000;
+    uint16_t sensorlessCurrentMilliamps = 800;
+    uint16_t sensorlessTimeMs = 60;
+    bool powerOnAutomatic = false;
+};
+
+inline bool zdtResponseModeHasImmediateAck(uint8_t responseMode)
+{
+    return responseMode == 0x01 || responseMode == 0x03;
+}
+
+inline std::array<uint8_t, 20> makeEmmV5HomingParametersFrame(
+    uint8_t address,
+    const ZdtHomingParameters& parameters,
+    bool store)
+{
+    return {
+        address, 0x4C, 0xAE, store ? uint8_t{0x01} : uint8_t{0x00},
+        static_cast<uint8_t>(parameters.mode), parameters.direction,
+        static_cast<uint8_t>((parameters.velocityRpm >> 8) & 0xFF),
+        static_cast<uint8_t>(parameters.velocityRpm & 0xFF),
+        static_cast<uint8_t>((parameters.timeoutMs >> 24) & 0xFF),
+        static_cast<uint8_t>((parameters.timeoutMs >> 16) & 0xFF),
+        static_cast<uint8_t>((parameters.timeoutMs >> 8) & 0xFF),
+        static_cast<uint8_t>(parameters.timeoutMs & 0xFF),
+        static_cast<uint8_t>((parameters.sensorlessSpeedRpm >> 8) & 0xFF),
+        static_cast<uint8_t>(parameters.sensorlessSpeedRpm & 0xFF),
+        static_cast<uint8_t>(
+            (parameters.sensorlessCurrentMilliamps >> 8) & 0xFF),
+        static_cast<uint8_t>(parameters.sensorlessCurrentMilliamps & 0xFF),
+        static_cast<uint8_t>((parameters.sensorlessTimeMs >> 8) & 0xFF),
+        static_cast<uint8_t>(parameters.sensorlessTimeMs & 0xFF),
+        parameters.powerOnAutomatic ? uint8_t{0x01} : uint8_t{0x00},
+        ZDT_TAIL
+    };
+}
+
+inline bool decodeEmmV5HomingParametersResponse(
+    const std::array<uint8_t, 18>& response,
+    uint8_t expectedAddress,
+    ZdtHomingParameters& parameters)
+{
+    if (response[0] != expectedAddress || response[1] != 0x22 ||
+        response.back() != ZDT_TAIL || response[2] > 0x03) {
+        return false;
+    }
+    parameters.mode = static_cast<ZdtHomingMode>(response[2]);
+    parameters.direction = response[3];
+    parameters.velocityRpm = static_cast<uint16_t>(
+        (static_cast<uint16_t>(response[4]) << 8) | response[5]);
+    parameters.timeoutMs =
+        (static_cast<uint32_t>(response[6]) << 24) |
+        (static_cast<uint32_t>(response[7]) << 16) |
+        (static_cast<uint32_t>(response[8]) << 8) |
+        static_cast<uint32_t>(response[9]);
+    parameters.sensorlessSpeedRpm = static_cast<uint16_t>(
+        (static_cast<uint16_t>(response[10]) << 8) | response[11]);
+    parameters.sensorlessCurrentMilliamps = static_cast<uint16_t>(
+        (static_cast<uint16_t>(response[12]) << 8) | response[13]);
+    parameters.sensorlessTimeMs = static_cast<uint16_t>(
+        (static_cast<uint16_t>(response[14]) << 8) | response[15]);
+    parameters.powerOnAutomatic = response[16] != 0;
+    return true;
+}
 
 inline uint8_t makeEmmV5AccelerationLevel(double rpmPerSecond)
 {
@@ -500,6 +581,30 @@ public:
         return true;
     }
 
+    bool readHomingParameters(ZdtHomingParameters& parameters)
+    {
+        const uint8_t command[] = {address_, 0x22, ZDT_TAIL};
+        std::array<uint8_t, 18> response{};
+        if (!exchange(command, sizeof(command), 0x22,
+                      response.data(), response.size(), true)) {
+            return false;
+        }
+        if (!decodeEmmV5HomingParametersResponse(
+                response, address_, parameters)) {
+            std::fprintf(stderr, "invalid ZDT homing parameter response\n");
+            return false;
+        }
+        return true;
+    }
+
+    bool writeHomingParameters(const ZdtHomingParameters& parameters,
+                               bool store)
+    {
+        const auto frame = makeEmmV5HomingParametersFrame(
+            address_, parameters, store);
+        return sendControlCommand(frame.data(), frame.size(), 0x4C);
+    }
+
     bool configureDriverParameters(const ZdtDriverParameters& parameters)
     {
         const uint32_t fullStepsPerRevolution =
@@ -565,6 +670,91 @@ public:
             address_, 0x0A, 0x6D, ZDT_TAIL
         };
         return sendControlCommand(frame, sizeof(frame), 0x0A);
+    }
+
+    bool setSingleTurnOrigin(bool store)
+    {
+        const uint8_t frame[] = {
+            address_, 0x93, 0x88,
+            store ? uint8_t{0x01} : uint8_t{0x00}, ZDT_TAIL
+        };
+        return sendControlCommand(frame, sizeof(frame), 0x93);
+    }
+
+    bool triggerHoming(ZdtHomingMode mode, bool synchronized = false)
+    {
+        const uint8_t frame[] = {
+            address_, 0x9A, static_cast<uint8_t>(mode),
+            synchronized ? uint8_t{0x01} : uint8_t{0x00}, ZDT_TAIL
+        };
+        return sendControlCommand(frame, sizeof(frame), 0x9A);
+    }
+
+    bool abortHoming()
+    {
+        const uint8_t frame[] = {address_, 0x9C, 0x48, ZDT_TAIL};
+        return sendControlCommand(frame, sizeof(frame), 0x9C);
+    }
+
+    bool waitForHomingComplete(int timeoutMs, int pollIntervalMs)
+    {
+        const int boundedPollMs = std::clamp(pollIntervalMs, 10, 500);
+        const int64_t startMs = millisecondsNow();
+        const int64_t deadlineMs = startMs + std::max(100, timeoutMs);
+        bool observedHoming = false;
+        int stationarySamples = 0;
+
+        while (millisecondsNow() <= deadlineMs) {
+            uint8_t status = 0;
+            if (!readOriginStatus(status)) return false;
+            if ((status & ZDT_ORIGIN_FAILED) != 0) {
+                std::fprintf(stderr,
+                    "ZDT absolute homing failed: origin_status=0x%02X\n",
+                    static_cast<unsigned>(status));
+                return false;
+            }
+
+            if ((status & ZDT_ORIGIN_HOMING) != 0) {
+                observedHoming = true;
+                stationarySamples = 0;
+            } else {
+                double speedRpm = 0.0;
+                if (!readRealtimeSpeedRpm(speedRpm)) return false;
+                stationarySamples = std::abs(speedRpm) < 0.5 ?
+                    stationarySamples + 1 : 0;
+                const bool commandHadTimeToStart =
+                    millisecondsNow() - startMs >= 3 * boundedPollMs;
+                if (stationarySamples >= 3 &&
+                    (observedHoming || commandHadTimeToStart)) {
+                    return true;
+                }
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(boundedPollMs));
+        }
+
+        std::fprintf(stderr, "ZDT absolute homing timed out after %d ms\n",
+                     timeoutMs);
+        abortHoming();
+        stop();
+        return false;
+    }
+
+    bool homeToStoredSingleTurnOrigin(int timeoutMs, int pollIntervalMs)
+    {
+        uint8_t status = 0;
+        if (!readOriginStatus(status)) return false;
+        if ((status & ZDT_ORIGIN_FAILED) != 0) {
+            std::fprintf(stderr,
+                "ZDT origin status already reports failure: 0x%02X\n",
+                static_cast<unsigned>(status));
+            return false;
+        }
+        if ((status & ZDT_ORIGIN_HOMING) == 0 &&
+            !triggerHoming(ZdtHomingMode::Nearest, false)) {
+            return false;
+        }
+        return waitForHomingComplete(timeoutMs, pollIntervalMs);
     }
 
     double quantizeVelocityRpm(double signedRpm) const

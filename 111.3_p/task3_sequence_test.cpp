@@ -55,6 +55,11 @@ AppConfig makePdiConfig()
     config.task3IntegralZoneCm = 0.50;
     config.task3IntegralSpeedLimitCmS = 1.0;
     config.task3IntegralLimitCmSeconds = 0.75;
+    config.task3BreakawayErrorCm = 1.0;
+    config.task3BreakawaySpeedCmS = 0.35;
+    config.task3BreakawayDelaySeconds = 0.12;
+    config.task3BreakawayRampDegPerSecond = 0.50;
+    config.task3BreakawayMaximumAngleDeg = 0.15;
     config.task3OutputAngleLimitDeg = 0.35;
     return config;
 }
@@ -95,8 +100,17 @@ void testPdiMotionController()
     assert(returnFast.angleDeg < returnSlow.angleDeg);
     assert(returnFast.angleDeg < 0.0);
 
-    // I appears only near the final -5 target at low speed and remains much
-    // smaller than the 0.35 deg travel envelope.
+    // I appears near either target at low speed and remains much smaller than
+    // the travel envelope.  It is cleared on every target reversal.
+    Task3MotionController positiveIntegralController(config);
+    Task3MotionCommand positiveFinalCommand;
+    for (int index = 0; index < 10; ++index) {
+        positiveFinalCommand = positiveIntegralController.update(
+            Task3Phase::MoveToPositive, -0.25, 0.0, 0.10);
+    }
+    assert(positiveFinalCommand.integralWindowActive);
+    assert(positiveFinalCommand.integralAngleDeg < 0.0);
+
     Task3MotionCommand finalCommand;
     for (int index = 0; index < 10; ++index) {
         finalCommand = controller.update(
@@ -112,6 +126,28 @@ void testPdiMotionController()
         Task3Phase::HoldNegative, 0.60, 0.0, 0.01);
     assert(!outsideIntegralWindow.integralWindowActive);
     assert(std::abs(outsideIntegralWindow.integralAngleDeg) < 1e-12);
+
+    // A large error with no measured ball response gradually expands the
+    // output beyond the normal PD limit.  It is feedback-triggered and decays
+    // immediately after the ball starts moving.
+    Task3MotionController breakawayController(config);
+    Task3MotionCommand stuckCommand;
+    for (int index = 0; index < 30; ++index) {
+        stuckCommand = breakawayController.update(
+            Task3Phase::MoveToPositive, -5.0, 0.0, 0.02);
+    }
+    assert(stuckCommand.breakawayActive);
+    assert(stuckCommand.breakawayAngleDeg < -0.10);
+    assert(stuckCommand.angleDeg < -config.task3OutputAngleLimitDeg);
+    assert(stuckCommand.angleDeg >= -0.50 - 1e-9);
+
+    Task3MotionCommand movingCommand;
+    for (int index = 0; index < 6; ++index) {
+        movingCommand = breakawayController.update(
+            Task3Phase::MoveToPositive, -5.0, 2.0, 0.02);
+    }
+    assert(!movingCommand.breakawayActive);
+    assert(std::abs(movingCommand.breakawayAngleDeg) < 1e-9);
 }
 
 void testTwoFrameSpeedEstimator()

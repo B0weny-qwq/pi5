@@ -170,7 +170,8 @@ public:
                 "elapsed_s,armed,center_ready_frames,ball_measured,"
                 "ball_locked,confidence,pixel_x,pixel_y,position_cm,"
                 "target_cm,error_cm,speed_cm_s,two_frame_speed_cm_s,"
-                "requested_angle_deg,applied_angle_deg,motor_target_steps,"
+                "requested_angle_deg,breakaway_angle_deg,applied_angle_deg,"
+                "motor_target_steps,"
                 "motor_actual_steps,motor_target_rpm,motor_actual_rpm,"
                 "motor_command_rpm,motor_wire_rpm,"
                 "motor_acceleration_rpm_s\n",
@@ -223,6 +224,7 @@ public:
         double speedCmS,
         double rawTwoFrameSpeedCmS,
         double requestedAngleDeg,
+        double breakawayAngleDeg,
         double appliedAngleDeg,
         int motorTargetSteps,
         const MotorLoopTelemetry& motorTelemetry)
@@ -231,11 +233,12 @@ public:
         std::fprintf(
             csvFile_,
             "%.6f,%d,%d,%d,%d,%.5f,%.3f,%.3f,%.5f,%.5f,%+.5f,%+.5f,"
-            "%+.5f,%+.6f,%+.6f,%d,%+.3f,%+.3f,%+.3f,%+.3f,%+.3f,%+.3f\n",
+            "%+.5f,%+.6f,%+.6f,%+.6f,%d,%+.3f,%+.3f,%+.3f,%+.3f,%+.3f,%+.3f\n",
             secondsNow() - startTime_, armed ? 1 : 0, centerReadyFrames,
             ballMeasured ? 1 : 0, ballLocked ? 1 : 0, confidence, pixelX,
             pixelY, positionCm, targetCm, errorCm, speedCmS,
-            rawTwoFrameSpeedCmS, requestedAngleDeg, appliedAngleDeg,
+            rawTwoFrameSpeedCmS, requestedAngleDeg, breakawayAngleDeg,
+            appliedAngleDeg,
             motorTargetSteps, motorTelemetry.actualSteps,
             motorTelemetry.targetSpeedRpm, motorTelemetry.actualSpeedRpm,
             motorTelemetry.commandSpeedRpm,
@@ -355,12 +358,28 @@ inline int runTask3App(const AppConfig& config)
     std::shared_ptr<const cv::Mat> capturedFrame;
 
     std::unique_ptr<UdpVideoStreamer> videoStreamer;
+    cv::Rect videoStreamArea;
     if (config.videoStreamEnabled) {
+        const cv::Rect requestedStreamArea =
+            config.pipeDisplayArea.width > 0 &&
+            config.pipeDisplayArea.height > 0 ?
+                config.pipeDisplayArea : config.roi;
+        videoStreamArea = boundedVisionRect(requestedStreamArea, frame.size());
+        const int alignedWidth = videoStreamArea.width & ~15;
+        const int alignedHeight = videoStreamArea.height & ~15;
+        videoStreamArea.x += (videoStreamArea.width - alignedWidth) / 2;
+        videoStreamArea.y += (videoStreamArea.height - alignedHeight) / 2;
+        videoStreamArea.width = alignedWidth;
+        videoStreamArea.height = alignedHeight;
+        if (videoStreamArea.width < 16 || videoStreamArea.height < 16) {
+            std::fprintf(stderr, "video stream crop area is empty\n");
+            return 1;
+        }
         videoStreamer = std::make_unique<UdpVideoStreamer>(
             config.videoStreamHost,
             config.videoStreamPort,
-            config.cameraWidth,
-            config.cameraHeight,
+            videoStreamArea.width,
+            videoStreamArea.height,
             config.videoStreamFps,
             config.videoStreamBitrateKbps);
         if (!videoStreamer->start()) return 1;
@@ -394,6 +413,27 @@ inline int runTask3App(const AppConfig& config)
         }
         motor = std::make_unique<EmmV5Motor>(serial, config);
 
+        ZdtDriverParameters driverParameters;
+        if (!motor->readDriverParameters(driverParameters) ||
+            !motor->configureDriverParameters(driverParameters)) {
+            std::fprintf(stderr,
+                "ZDT driver parameter query failed before startup\n");
+            diagnostics.write(
+                "ERROR ZDT driver parameter query failed before startup");
+            return 1;
+        }
+        const bool immediateCommandAck =
+            zdtResponseModeHasImmediateAck(driverParameters.responseMode);
+        motor->setExpectCommandAck(immediateCommandAck);
+        diagnostics.write(
+            "ZDT_CONFIG motor_type=%u mstep=%u response=%u ack=%d command_ppr=%u",
+            static_cast<unsigned>(driverParameters.motorType),
+            static_cast<unsigned>(driverParameters.microstep),
+            static_cast<unsigned>(driverParameters.responseMode),
+            immediateCommandAck ? 1 : 0,
+            static_cast<unsigned>(
+                motor->positionCommandPulsesPerRevolution()));
+
         if (!motor->enable()) {
             std::fprintf(stderr, "ZDT enable command failed\n");
             diagnostics.write("ERROR ZDT enable command failed");
@@ -413,6 +453,54 @@ inline int runTask3App(const AppConfig& config)
 
         // validateConfig已要求motorEnabled时zeroOnStart=true。
         // 执行这一行之前，使用者必须保证水管真的处于机械水平位置。
+        if (config.absoluteEncoderHomeOnStart) {
+            ZdtHomingParameters homingParameters;
+            if (!motor->readHomingParameters(homingParameters)) {
+                std::fprintf(stderr,
+                    "ZDT absolute homing parameters could not be read\n");
+                diagnostics.write(
+                    "ERROR ZDT absolute homing parameters could not be read");
+                motor->stop();
+                return 1;
+            }
+            diagnostics.write(
+                "ABS_HOME_CONFIG mode=%u rpm=%u timeout_ms=%u power_on=%d",
+                static_cast<unsigned>(homingParameters.mode),
+                static_cast<unsigned>(homingParameters.velocityRpm),
+                static_cast<unsigned>(homingParameters.timeoutMs),
+                homingParameters.powerOnAutomatic ? 1 : 0);
+            if (homingParameters.mode != ZdtHomingMode::Nearest ||
+                homingParameters.velocityRpm !=
+                    static_cast<uint16_t>(config.absoluteEncoderHomeRpm) ||
+                homingParameters.powerOnAutomatic) {
+                std::fprintf(stderr,
+                    "ZDT absolute origin is not configured for safe startup; "
+                    "run ./motor_cli origin-set at LEVEL\n");
+                diagnostics.write(
+                    "ERROR unsafe absolute home configuration; run origin-set");
+                motor->stop();
+                return 1;
+            }
+
+            std::fprintf(stderr,
+                "returning to stored absolute encoder zero at %d RPM...\n",
+                config.absoluteEncoderHomeRpm);
+            diagnostics.write("EVENT absolute encoder homing started");
+            if (!motor->homeToStoredSingleTurnOrigin(
+                    config.absoluteEncoderHomeTimeoutMs,
+                    config.absoluteEncoderHomePollMs)) {
+                std::fprintf(stderr,
+                    "ZDT absolute encoder homing failed; control refused\n");
+                diagnostics.write("ERROR absolute encoder homing failed");
+                motor->stop();
+                return 1;
+            }
+            diagnostics.write("EVENT absolute encoder homing completed");
+        }
+
+        // Clear the high-resolution runtime coordinate only after the stored
+        // absolute origin has been reached. Legacy startup zeroing remains an
+        // explicit fallback and is disabled in the competition configuration.
         if (!motor->clearPosition()) {
             std::fprintf(stderr, "ZDT clear-position command failed\n");
             diagnostics.write("ERROR ZDT clear-position command failed");
@@ -456,10 +544,11 @@ inline int runTask3App(const AppConfig& config)
             originStatusOk && (originStatus & 0x02) ? 1 : 0);
 
         std::fprintf(stderr,
-            "ZDT velocity mode ready: %s %d baud, address=%d; current LEVEL is zero\n",
+            "ZDT velocity mode ready: %s %d baud, address=%d; stored LEVEL is zero\n",
             config.serialPort.c_str(), config.serialBaud,
             config.motorAddress);
-        diagnostics.write("ZDT velocity mode ready; current LEVEL is logical zero");
+        diagnostics.write(
+            "ZDT velocity mode ready; stored absolute LEVEL is logical zero");
     } else {
         // dry-run仍计算并显示角度与脉冲，但不会打开UART或发送任何字节。
         std::fprintf(stderr,
@@ -512,7 +601,8 @@ inline int runTask3App(const AppConfig& config)
         std::printf(
             "frame,time,measured,target_cm,position_cm,error_cm,speed_cm_s,"
             "speed_two_frame_cm_s,"
-            "requested_angle_deg,applied_angle_deg,motor_target_steps,"
+            "requested_angle_deg,breakaway_angle_deg,applied_angle_deg,"
+            "motor_target_steps,"
             "motor_actual_steps,motor_target_rpm,motor_actual_rpm,"
             "motor_command_rpm,motor_acceleration_rpm_s,confidence\n");
     }
@@ -647,7 +737,8 @@ inline int runTask3App(const AppConfig& config)
             diagnostics.write(
                 "LOOP armed=%d center_ready=%d/6 ball=%d locked=%d "
                 "confidence=%.2f px=(%.1f,%.1f) cm=%.3f target=%.3f "
-                "error=%+.3f v=%.3f v2=%.3f request=%+.4f applied=%+.4f "
+                "error=%+.3f v=%.3f v2=%.3f request=%+.4f "
+                "breakaway=%+.4f applied=%+.4f "
                 "M[tgt=%d pos=%.1f target_rpm=%+.2f actual_rpm=%+.2f "
                 "cmd=%+.2f wire=%+.2f acc=%+.2f]",
                 armed ? 1 : 0, std::min(centerReadyFrames, 6),
@@ -656,7 +747,8 @@ inline int runTask3App(const AppConfig& config)
                 result.measured ? result.center.x : -1.0f,
                 result.measured ? result.center.y : -1.0f,
                 positionCm, targetCm, errorCm, speedCmS, rawTwoFrameSpeedCmS,
-                requestedAngleDeg, appliedAngleDeg, motorSteps,
+                requestedAngleDeg, motionCommand.breakawayAngleDeg,
+                appliedAngleDeg, motorSteps,
                 motorTelemetry.actualSteps, motorTelemetry.targetSpeedRpm,
                 motorTelemetry.actualSpeedRpm,
                 motorTelemetry.commandSpeedRpm,
@@ -668,7 +760,8 @@ inline int runTask3App(const AppConfig& config)
                 result.measured ? result.center.x : -1.0f,
                 result.measured ? result.center.y : -1.0f,
                 positionCm, targetCm, errorCm, speedCmS, rawTwoFrameSpeedCmS,
-                requestedAngleDeg, appliedAngleDeg, motorSteps,
+                requestedAngleDeg, motionCommand.breakawayAngleDeg,
+                appliedAngleDeg, motorSteps,
                 motorTelemetry);
             nextRuntimeLogTime = now +
                 config.runtimeLogIntervalMs / 1000.0;
@@ -676,7 +769,7 @@ inline int runTask3App(const AppConfig& config)
 
         if (config.csv) {
             std::printf(
-                "%llu,%.6f,%d,%.4f,%.4f,%+.4f,%+.4f,%+.4f,%+.5f,%+.5f,%d,"
+                "%llu,%.6f,%d,%.4f,%.4f,%+.4f,%+.4f,%+.4f,%+.5f,%+.5f,%+.5f,%d,"
                 "%+.3f,%+.3f,%+.3f,%+.3f,%+.3f,%.3f\n",
                 static_cast<unsigned long long>(sequence),
                 now,
@@ -687,6 +780,7 @@ inline int runTask3App(const AppConfig& config)
                 speedCmS,
                 rawTwoFrameSpeedCmS,
                 requestedAngleDeg,
+                motionCommand.breakawayAngleDeg,
                 appliedAngleDeg,
                 motorSteps,
                 motorTelemetry.actualSteps,
@@ -725,6 +819,18 @@ inline int runTask3App(const AppConfig& config)
 
         if (previewRequested || streamRequested) {
             cv::Mat displayFrame = frame.clone();
+            cv::Mat grayscaleBackground;
+            if (displayFrame.channels() == 3) {
+                cv::cvtColor(displayFrame, grayscaleBackground,
+                             cv::COLOR_BGR2GRAY);
+                cv::cvtColor(grayscaleBackground, displayFrame,
+                             cv::COLOR_GRAY2BGR);
+            } else if (displayFrame.channels() == 4) {
+                cv::cvtColor(displayFrame, grayscaleBackground,
+                             cv::COLOR_BGRA2GRAY);
+                cv::cvtColor(grayscaleBackground, displayFrame,
+                             cv::COLOR_GRAY2BGR);
+            }
             // 黄框框出当前画面的整段可见水管；第3题的实际霍夫搜索ROI更窄。
             // 该框在detector.update()之后才绘制，不会被算法当成画面边缘。
             if (config.drawPipeDetectionArea) {
@@ -743,7 +849,7 @@ inline int runTask3App(const AppConfig& config)
             // 识别到钢球就直接画绿色，不再用额外状态改变圆圈颜色。
             if (result.measured) {
                 drawBall(displayFrame, result.center, result.radius,
-                         result.confidence, cv::Scalar(0, 255, 0));
+                         cv::Scalar(0, 255, 0));
             } else {
                 char visionText[128];
                 std::snprintf(visionText, sizeof(visionText),
@@ -780,8 +886,9 @@ inline int runTask3App(const AppConfig& config)
             char motorText[160];
             std::snprintf(
                 motorText, sizeof(motorText),
-                "request=%+.3fdeg pipe=%+.3fdeg",
-                requestedAngleDeg, appliedAngleDeg);
+                "request=%+.3fdeg brk=%+.3fdeg pipe=%+.3fdeg",
+                requestedAngleDeg, motionCommand.breakawayAngleDeg,
+                appliedAngleDeg);
             cv::putText(displayFrame, motorText, {10, 80},
                         cv::FONT_HERSHEY_SIMPLEX, 0.46,
                         {0, 255, 255}, 1, cv::LINE_AA);
@@ -840,15 +947,16 @@ inline int runTask3App(const AppConfig& config)
                             : cv::Scalar(220, 220, 220),
                         1, cv::LINE_AA);
 
-            // Mat浅拷贝只增加像素缓冲引用计数；预览和编码线程均只读画面。
+            // The network encoder receives only the pipe ROI.
             if (previewRequested && streamRequested) {
-                cv::Mat streamFrame = displayFrame;
+                cv::Mat streamFrame = displayFrame(videoStreamArea).clone();
                 preview.publish(std::move(displayFrame));
                 videoStreamer->publish(std::move(streamFrame));
             } else if (previewRequested) {
                 preview.publish(std::move(displayFrame));
             } else {
-                videoStreamer->publish(std::move(displayFrame));
+                cv::Mat streamFrame = displayFrame(videoStreamArea).clone();
+                videoStreamer->publish(std::move(streamFrame));
             }
         }
 

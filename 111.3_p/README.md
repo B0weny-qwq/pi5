@@ -42,7 +42,7 @@ MISS = 锁定后的连续漏检次数
 机构模型：目标水管角度 -> 目标电机轴位（脉冲）
 
 50 Hz电机串级环：
-0x30实时脉冲数 -> 位置误差 -> 目标RPM（含制动速度上限）
+0x36高分辨率位置 -> 位置误差 -> 目标RPM（含制动速度上限）
 0x35电机实时转速 -> 速度误差 -> 目标加速度
 目标加速度 -> 加速度限制 -> 跃度限制 -> 0xF6速度命令
 0xF6速度斜率(RPM/s) -> ZDT内部20 kHz速度闭环
@@ -72,14 +72,14 @@ P_Serial    = UART_FUN
 Baud        = 115200
 ID_Addr     = 1
 Checksum    = 0x6B
-Response    = None
+Response    = Receive
 S_Vel_IS    = Disable
 En          = Hold
 ```
 
-`Response` 必须为 `None`，因为程序以 50 Hz 连续发速度命令且不接收异步 ACK；读取
-`0x30` 与 `0x35` 仍会正常返回数据。`S_Vel_IS` 必须关闭；若开启，驱动器会把代码
-发送的 RPM 再缩小 10 倍。
+程序启动时读取驱动参数，并根据 `Response` 自动决定是否接收控制命令 ACK；当前实机
+为 `Receive`。位置反馈使用 `0x36`，速度反馈使用 `0x35`。`S_Vel_IS` 必须关闭；若
+开启，驱动器会把代码发送的 RPM 再缩小 10 倍。
 
 ## 当前电机环参数
 
@@ -98,12 +98,14 @@ config.motorPositionToleranceSteps = 1.0;
 config.motorStopSpeedRpm = 1.0;
 config.motorSoftLimitSteps = 11;               // 相对水平零位的正负软限位
 config.motorReplyTimeoutMs = 15;
+config.absoluteEncoderHomeOnStart = true;
+config.absoluteEncoderHomeRpm = 6;
 config.exitReturnTimeoutMs = 1800;
 ```
 
-`0xF6` 的第 4-5 字节是速度斜率（RPM/s），第 6-7 字节是目标速度（0.1 RPM）。
-`motorSpeedSlopeRpmS` 必须不低于软件最大加速度 `motorMaximumAccelerationRpmS`，
-否则驱动器会额外限速，软件制动模型会失真。
+代码把目标速度量化为 Emm V5 `0xF6` 的整数 RPM，并把 `200 RPM/s` 转换为驱动协议的
+加速度档位。`motorSpeedSlopeRpmS` 必须不低于软件最大加速度
+`motorMaximumAccelerationRpmS`，否则驱动器会额外限速，软件制动模型会失真。
 
 ## 第3题钢球 PDI 控制
 
@@ -118,9 +120,10 @@ pipe_angle = clamp(Kp * error + Kd * v2_filtered + Ki * integral(error), +/- 0.3
 
 `Kp=0.070 deg/cm` 使起点距离 `+5 cm` 时自然得到 `0.35 deg`，保留原来已经有效的
 输出量级，但没有任何“去 +5 用固定角度”的分支。`Kd=0.020 deg/(cm/s)`，所以球速
-每增加 `5 cm/s`，D项增加 `0.10 deg` 的反向制动。积分只在最终 `O-5` 的 `0.50 cm`
-范围内、速度不超过 `1 cm/s` 时工作，最大积分输出为 `0.09 deg`，用于消除静摩擦和
-机构偏置，不参与长距离行程。
+每增加 `5 cm/s`，D项增加 `0.10 deg` 的反向制动。积分在两个目标附近的 `0.50 cm`
+范围内、速度不超过 `1 cm/s` 时工作；目标切换时立即清零，最大积分输出为 `0.09 deg`。
+大误差且球速低于 `0.35 cm/s` 持续 `120 ms` 时，反馈触发的虚位补偿最多再增加
+`0.15 deg`，球开始运动后快速撤销。
 
 `task3PositiveToleranceCm=0.25` 后，状态机在 `+4.75 cm` 以内的连续两帧真实检测后
 才切到 `O-5`，不再在 `+3 cm` 提前折返。
@@ -130,7 +133,7 @@ pipe_angle = clamp(Kp * error + Kd * v2_filtered + Ki * integral(error), +/- 0.3
 预览中的电机行：
 
 ```text
-M tgt=目标轴位  pos=0x30实时脉冲数  rpm=0x35实测RPM  cmd=命令RPM  acc=命令加速度
+M tgt=目标轴位  pos=0x36实时位置  rpm=0x35实测RPM  cmd=命令RPM  acc=命令加速度
 ```
 
 CSV 同时记录这些量。现场判断顺序：
@@ -142,8 +145,8 @@ CSV 同时记录这些量。现场判断顺序：
 
 ## 运行诊断日志
 
-每次启动都会自动创建 `logs/task3_start_YYYYMMDD_HHMMSS_mmm.log` 和同名 `.csv`，并
-同步打印事件到终端。`.log` 记录串口、细分、ZDT `0x30/0x35/0x3A/0x3B` 状态、按空格
+每次启动都会自动创建 `logs/task1_pdi_YYYYMMDD_HHMMSS_mmm.log` 和同名 `.csv`，并
+同步打印事件到终端。`.log` 记录串口、细分、ZDT `0x36/0x35/0x3A/0x3B` 状态、按空格
 被拦截、ARM、丢球、串口失败和退出；`.csv` 每 `200 ms` 记录钢球位置/速度、是否已
 ARM、O 点稳定帧数、目标/实际电机脉冲、实际 RPM、控制 RPM 和实际下发的 F6 RPM，便于
 一次运行后直接导入 Excel 或画曲线。
@@ -207,12 +210,12 @@ Q/ESC   用速度串级环回水平零位，再发送立即停止并退出
 ## E611低延迟图传
 
 程序默认把带钢球识别、任务阶段和电机状态的画面编码为
-`640x480 30 FPS H.264/MPEG-TS`，通过UDP发送到场外电脑：
+`640x480 20 FPS`灰度`H.264/MPEG-TS`，通过UDP发送到场外电脑：
 
 ```text
-目标IP：192.168.50.1
+目标IP：192.168.137.1
 目标端口：5600/UDP
-码率：4000 kbit/s
+码率：1500 kbit/s
 ```
 
 摄像头采集和识别仍保持120 FPS。图传使用独立单帧队列，编码或E611链路
@@ -221,8 +224,8 @@ Q/ESC   用速度串级环回水平零位，再发送立即停止并退出
 树莓派与场外电脑的有线网卡分别配置为同一网段，例如：
 
 ```text
-树莓派eth0：192.168.50.2/24
-场外电脑：  192.168.50.1/24
+树莓派eth0：192.168.137.2/24
+场外电脑：  192.168.137.1/24
 ```
 
 Windows VLC选择“媒体 -> 打开网络串流”，输入：
@@ -249,16 +252,26 @@ opencv_version --verbose | grep -i gstreamer
 
 ## 安全检查
 
-当前配置启用真实电机并在启动时清零：
+当前配置启用真实电机并在每次启动时回到持久绝对编码器原点：
 
 ```cpp
 config.motorEnabled = true;
-config.zeroOnStart = true;
+config.absoluteEncoderHomeOnStart = true;
+config.absoluteEncoderHomeRpm = 6;
+config.zeroOnStart = false;
 config.serialPort = "/dev/ttyAMA0";
 ```
 
-启动瞬间会把当前位置定义为水平零位。运行前必须确认水管真实水平、连杆未顶住限位、
-GPIO14/TXD 物理 8 脚接 ZDT RX、GPIO15/RXD 物理 10 脚接 ZDT TX，并共地。
+第一次使用时，将水管放在真实水平位置并执行：
+
+```bash
+./motor_cli origin-set
+```
+
+该命令用 `0x93` 把当前单圈绝对编码器角度保存为永久零点，并保存 `Nearest / 6 RPM`
+回零参数。以后程序启动先用 `0x9A` 自动回到该原点，确认完成后才把高分辨率 `0x36`
+运行坐标清零并进入 `PAUSED`。回零失败、参数不一致或超时都会拒绝启动。GPIO14/TXD
+物理 8 脚接 ZDT RX、GPIO15/RXD 物理 10 脚接 ZDT TX，并共地。
 
 任意编码器查询、速度查询或控制应答超时都会结束主循环。退出时程序会在
 `exitReturnTimeoutMs` 内闭环回零，随后无论是否到位都发送 `0xFE` 立即停止。
