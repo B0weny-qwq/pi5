@@ -105,7 +105,7 @@ struct AppConfig {
     // ---------------- 曲柄连杆与脉冲换算 ----------------
     double crankRadiusMm = 15.0;
     double actuatorDistanceMm = 250.0;
-    int pulsesPerRevolution = 6400;
+    int pulsesPerRevolution = 200;
     int motorSign = 1;
 
     // 有两个以上点时优先查表插值；为空时使用曲柄连杆近似公式。

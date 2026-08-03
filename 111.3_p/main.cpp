@@ -186,9 +186,8 @@ ball_stepper::AppConfig makeUserConfig()
     // 【必须实测】水管固定铰链中心到连杆与水管连接点中心的距离。
     config.actuatorDistanceMm = 250.0;
 
-    // 【必须与ZDT细分设置一致】当前驱动器为200整步 x 32细分 = 6400。
-    // 与旧3200细分相比，同一真实水管角度需要两倍脉冲。
-    config.pulsesPerRevolution = 6400;
+    // Must match the ZDT driver: 1.8-degree full-step mode, 200 PPR.
+    config.pulsesPerRevolution = 200;
 
     // +1表示正脉冲应使axisRight端升高；实际相反时只改成-1。
     config.motorSign = 1;
@@ -230,32 +229,31 @@ ball_stepper::AppConfig makeUserConfig()
 
     // ZDT 0xF6 speed slope is an explicit RPM/s value. Keep it above the
     // software acceleration limit so the software trajectory remains active.
-    config.motorSpeedSlopeRpmS = 30;
+    config.motorSpeedSlopeRpmS = 200;
 
     // Each cycle reads 0x30 pulse position and 0x35 speed, then sends 0xF6.
     config.motorCommandHz = 50;
 
-    // 脉冲数翻倍后，每脉冲物理角度减半，所以每脉冲位置增益减半；同一真实
-    // 水管角误差仍得到与旧3200细分相同的目标RPM。
-    config.motorPositionKpRpmPerStep = 0.0225;
+    // Preserve the physical position-loop gain after changing from 6400 PPR.
+    config.motorPositionKpRpmPerStep = 0.72;
 
     // 速度误差乘以本项得到期望加速度；ZDT内部仍使用自己的20 kHz速度闭环。
     config.motorVelocityKpPerSecond = 8.0;
 
     // 软件加速度环和跃度限制。推拉连杆换向时先平滑减速过零，再反向加速。
-    config.motorMaximumAccelerationRpmS = 20.0;
+    config.motorMaximumAccelerationRpmS = 200.0;
     config.motorMaximumJerkRpmS3 = 300.0;
 
-    // 制动速度公式使用45 RPM/s，低于最大65，补偿加速度经跃度限制后不能瞬间建立。
-    config.motorBrakingAccelerationRpmS = 8.0;
+    // Use the same bounded acceleration for the braking-distance model.
+    config.motorBrakingAccelerationRpmS = 200.0;
 
-    // 与旧1.5脉冲保持相同物理容差，6400细分下使用3脉冲。
-    config.motorPositionToleranceSteps = 3.0;
+    // 0.75 step is the exact scale conversion; use one feedback pulse.
+    config.motorPositionToleranceSteps = 1.0;
     config.motorStopSpeedRpm = 1.0;
     config.motorEncoderSpeedFilterSeconds = 0.04;
 
-    // 软限位也按细分翻倍：旧±180脉冲对应当前±360脉冲。
-    config.motorSoftLimitSteps = 360;
+    // Preserve the physical travel range of the former +/-360-step limit.
+    config.motorSoftLimitSteps = 11;
 
     // Driver Response must be None. Read commands still return 0x30/0x35
     // data, while suppressing asynchronous 0xF6 ACK frames at 50 Hz.

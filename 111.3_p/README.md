@@ -87,16 +87,16 @@ En          = Hold
 
 ```cpp
 config.motorRpm = 6;                          // 速度模式最大RPM
-config.motorSpeedSlopeRpmS = 30;               // 0xF6速度斜率，单位RPM/s
+config.motorSpeedSlopeRpmS = 200;              // 0xF6速度斜率，单位RPM/s
 config.motorCommandHz = 50;                   // 读位置、读速度、发速度的频率
-config.motorPositionKpRpmPerStep = 0.0225;    // 6400细分下：位置误差 -> 目标RPM
+config.motorPositionKpRpmPerStep = 0.72;      // 1.8度模式(200 PPR)：位置误差 -> 目标RPM
 config.motorVelocityKpPerSecond = 8.0;        // 速度误差 -> 目标加速度
-config.motorMaximumAccelerationRpmS = 20.0;   // 软件最大加速度
+config.motorMaximumAccelerationRpmS = 200.0;  // 软件最大加速度
 config.motorMaximumJerkRpmS3 = 300.0;         // 软件最大跃度
-config.motorBrakingAccelerationRpmS = 8.0;    // 制动距离使用的保守等效减速度
-config.motorPositionToleranceSteps = 3.0;
+config.motorBrakingAccelerationRpmS = 200.0;  // 制动距离使用的等效减速度
+config.motorPositionToleranceSteps = 1.0;
 config.motorStopSpeedRpm = 1.0;
-config.motorSoftLimitSteps = 360;              // 相对水平零位的正负软限位
+config.motorSoftLimitSteps = 11;               // 相对水平零位的正负软限位
 config.motorReplyTimeoutMs = 15;
 config.exitReturnTimeoutMs = 1800;
 ```
