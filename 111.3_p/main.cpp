@@ -59,8 +59,8 @@
 #define BALL_CFG_CLAHE_CLIP_LIMIT 2.2
 #define BALL_CFG_HOUGH_DP 1.0
 #define BALL_CFG_HOUGH_CANNY_HIGH 74.0
-#define BALL_CFG_HOUGH_ACCUM_ACQUIRE 3.0
-#define BALL_CFG_HOUGH_ACCUM_TRACK 3.0
+#define BALL_CFG_HOUGH_ACCUM_ACQUIRE 8.0
+#define BALL_CFG_HOUGH_ACCUM_TRACK 8.0
 #define BALL_CFG_REFINE_GRADIENT_MIN 16.0f
 #define BALL_CFG_REFINE_RESIDUAL_MAX 2.0f
 
@@ -99,10 +99,9 @@ ball_stepper::AppConfig makeUserConfig()
     // 固定安装后关闭自动对焦，避免识别过程中镜头反复改变清晰度和钢球外观。
     config.disableAutofocus = true;
 
-    // 【当前保持false】完全不让OpenCV改曝光。你已经验证这只摄像头原设置能
-    // 640x480 MJPG 120 FPS；程序强制切自动/手动曝光反而可能掉帧并增加拖影。
-    // 如果必须手动曝光，先用v4l2-ctl确认单位，保证曝光时间小于8.3 ms。
-    config.configureExposure = false;
+    // 每次启动主动启用自动曝光，适应现场照明变化。驱动会自行调整曝光时间；
+    // exposureAbsolute在自动模式下不参与控制。
+    config.configureExposure = true;
     config.useManualExposure = false;
     config.exposureAbsolute = 45.0;  // 如后续重开手动曝光，先从4.5 ms试起。
 
@@ -156,19 +155,19 @@ ball_stepper::AppConfig makeUserConfig()
     // ---------------- 4. 钢球 PDI 外环 ----------------
     // 直管左右机械条件接近，两侧使用完全相同的位置P增益。
     // 5 cm误差对应0.30 deg；接近目标后按误差线性减小。
-    config.task3MoveRightPositionKpDegPerCm = 0.050;
-    config.task3MoveLeftPositionKpDegPerCm = 0.050;
+    config.task3MoveRightPositionKpDegPerCm = 0.060;
+    config.task3MoveLeftPositionKpDegPerCm = 0.060;
 
-    // D仍使用x[n]与x[n-2]的速度。日志显示0.015在高速过靶时制动力不足；
+    // D仍使用x[n]与x[n-2]的速度。日志显示0.055在高速过靶时制动力不足；
     // P保持柔和的0.060，D恢复0.030只增强速度阻尼，不增加静止起步推力。
-    config.task3VelocityKdDegPerCmS = 0.060;
+    config.task3VelocityKdDegPerCmS = 0.0500;
 
     // I只在最后2.5 cm且球速较低时介入。最大I输出为0.250*0.80=0.20 deg，
     // 足够消除直管静差，同时比旧版0.40 deg柔和，目标反向时仍会清零。
     config.task3IntegralKiDegPerCmSecond = 0.250;
-    config.task3IntegralZoneCm = 2.50;
+    config.task3IntegralZoneCm = 3.0;
     config.task3IntegralSpeedLimitCmS = 1.0;
-    config.task3IntegralLimitCmSeconds = 0.80;
+    config.task3IntegralLimitCmSeconds = 1.0;
 
     // Breakaway overlaps the final I window, avoiding the old 0.5-1.0 cm gap
     // where neither compensation was active. It decays as soon as motion is
