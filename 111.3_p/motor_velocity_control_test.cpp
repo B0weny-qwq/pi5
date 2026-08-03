@@ -10,46 +10,89 @@ namespace {
 
 void testVelocityFrame()
 {
-    const auto frame = makeZdtVelocityFrame(0x01, -1500.0, 3000, 1000);
-    const std::array<uint8_t, 9> expected = {
-        0x01, 0xF6, 0x01, 0x03, 0xE8, 0x3A, 0x98, 0x00, 0x6B
+    const auto frame = makeEmmV5VelocityFrame(
+        0x01, -1500.0, 3000, 200);
+    const std::array<uint8_t, 8> expected = {
+        0x01, 0xF6, 0x01, 0x05, 0xDC, 0x9C, 0x00, 0x6B
     };
     assert(frame == expected);
 
-    const auto limited = makeZdtVelocityFrame(0x02, 4000.0, 25, 12);
+    const auto limited = makeEmmV5VelocityFrame(
+        0x02, 4000.0, 25, 200);
     assert(limited[0] == 0x02);
     assert(limited[2] == 0x00);
-    assert(limited[3] == 0x00 && limited[4] == 0x0C);
-    assert(limited[5] == 0x00 && limited[6] == 0xFA);
-    assert(limited[7] == 0x00 && limited[8] == 0x6B);
+    assert(limited[3] == 0x00 && limited[4] == 0x19);
+    assert(limited[5] == 0x9C);
+    assert(limited[6] == 0x00 && limited[7] == 0x6B);
 
-    const auto precise = makeZdtVelocityFrame(0x01, 0.4, 6, 30);
-    assert(precise[5] == 0x00 && precise[6] == 0x04);
+    const auto precise = makeEmmV5VelocityFrame(0x01, 0.4, 6, 30);
+    assert(precise[3] == 0x00 && precise[4] == 0x00);
+
+    assert(makeEmmV5AccelerationLevel(200.0) == 156);
+    assert(std::abs(emmV5AccelerationRpmS(156) - 200.0) < 1e-9);
 }
 
-void testTrapezoidalRelativeFrame()
+void testRelativePositionFrame()
 {
-    const auto frame = makeZdtTrapezoidalRelativeFrame(
-        0x01, -5.0, 6.0, 200, 200);
-    const std::array<uint8_t, 16> expected = {
-        0x01, 0xFD, 0x01,
-        0x00, 0xC8,
-        0x00, 0xC8,
-        0x00, 0x3C,
-        0x00, 0x00, 0x00, 0x32,
-        0x00, 0x00, 0x6B
+    const auto frame = makeEmmV5RelativePositionFrame(
+        0x01, -5.0, 6.0, 200, 3200);
+    const std::array<uint8_t, 13> expected = {
+        0x01, 0xFD, 0x01, 0x00, 0x06, 0x9C,
+        0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x6B
     };
     assert(frame == expected);
 
-    const auto positive = makeZdtTrapezoidalRelativeFrame(
-        0x02, 5.0, 6.0, 200, 150);
+    const auto positive = makeEmmV5RelativePositionFrame(
+        0x02, 5.0, 6.0, 200, 6400);
     assert(positive[0] == 0x02);
     assert(positive[2] == 0x00);
-    assert(positive[5] == 0x00 && positive[6] == 0x96);
-    assert(positive[9] == 0x00 && positive[10] == 0x00 &&
-           positive[11] == 0x00 && positive[12] == 0x32);
-    assert(positive[13] == 0x00 && positive[14] == 0x00 &&
-           positive[15] == 0x6B);
+    assert(positive[3] == 0x00 && positive[4] == 0x06);
+    assert(positive[5] == 0x9C);
+    assert(positive[6] == 0x00 && positive[7] == 0x00 &&
+           positive[8] == 0x00 && positive[9] == 0x59);
+    assert(positive[10] == 0x00 && positive[11] == 0x00 &&
+           positive[12] == 0x6B);
+}
+
+void testDriverParameterResponse()
+{
+    const std::array<uint8_t, 33> response = {
+        0x01, 0x42, 0x21, 0x15, 0x19, 0x02, 0x02, 0x02,
+        0x00, 0x10, 0x01, 0x00, 0x03, 0xE8, 0x0B, 0xB8,
+        0x0F, 0xA0, 0x05, 0x07, 0x01, 0x00, 0x01, 0x01,
+        0x00, 0x28, 0x09, 0x60, 0x0F, 0xA0, 0x00, 0x01,
+        0x6B
+    };
+    ZdtDriverParameters parameters;
+    assert(decodeZdtDriverParametersResponse(response, 0x01, parameters));
+    assert(parameters.motorType == 25);
+    assert(parameters.pulseControlMode == 0x02);
+    assert(parameters.serialPortFunction == 0x02);
+    assert(parameters.enableMode == 0x02);
+    assert(parameters.microstep == 0x10);
+    assert(parameters.uartBaudIndex == 0x05);
+    assert(parameters.checksumMode == 0x00);
+    assert(parameters.responseMode == 0x01);
+
+    auto invalid = response;
+    invalid[2] = 0x20;
+    assert(!decodeZdtDriverParametersResponse(invalid, 0x01, parameters));
+}
+
+void testIntegerRpmQuantizer()
+{
+    VelocityCommandQuantizer quantizer;
+    double sum = 0.0;
+    for (int index = 0; index < 8; ++index) {
+        const double wireRpm = quantizer.update(0.25);
+        assert(wireRpm == 0.0 || wireRpm == 1.0);
+        sum += wireRpm;
+    }
+    assert(sum == 2.0);
+
+    assert(quantizer.update(-0.5) == 0.0);
+    assert(quantizer.update(-0.5) == -1.0);
+    assert(quantizer.update(0.0) == 0.0);
 }
 
 void simulateToTarget(VelocityModePositionController& controller,
@@ -161,7 +204,7 @@ void testSmallPipeAngleTarget()
     assert(std::abs(speedRpm) < 1.0);
 }
 
-void testLowSpeedFeedbackAndDeciRpmProtocol()
+void testLowSpeedFeedbackWithIntegerRpmProtocol()
 {
     AppConfig config;
     config.pulsesPerRevolution = 6400;
@@ -183,7 +226,7 @@ void testLowSpeedFeedbackAndDeciRpmProtocol()
 
 }
 
-void testSmallTargetWithDeciRpmZdtFeedback()
+void testSmallTargetWithIntegerRpmZdtFeedback()
 {
     AppConfig config;
     config.pulsesPerRevolution = 6400;
@@ -200,6 +243,7 @@ void testSmallTargetWithDeciRpmZdtFeedback()
 
     VelocityModePositionController controller(config);
     EncoderSpeedEstimator estimator(config);
+    VelocityCommandQuantizer quantizer;
     constexpr double dt = 0.02;
     double positionSteps = 0.0;
     double physicalSpeedRpm = 0.0;
@@ -211,24 +255,21 @@ void testSmallTargetWithDeciRpmZdtFeedback()
             positionSteps, reportedSpeedRpm, dt);
         const MotorLoopTelemetry state = controller.update(
             34, positionSteps, feedbackSpeedRpm, dt);
-        const double wireSpeedRpm = std::round(
-            state.commandSpeedRpm * ZDT_SPEED_UNITS_PER_RPM) /
-            ZDT_SPEED_UNITS_PER_RPM;
+        const double wireSpeedRpm = quantizer.update(
+            state.commandSpeedRpm);
         assert(std::abs(wireSpeedRpm) <= config.motorRpm);
 
         physicalSpeedRpm = approach(
             physicalSpeedRpm, wireSpeedRpm, 82.0 * dt);
         positionSteps += physicalSpeedRpm / 60.0 *
             config.pulsesPerRevolution * dt;
-        reportedSpeedRpm = std::round(
-            physicalSpeedRpm * ZDT_SPEED_UNITS_PER_RPM) /
-            ZDT_SPEED_UNITS_PER_RPM;
+        reportedSpeedRpm = std::round(physicalSpeedRpm);
         maximumPositionSteps = std::max(
             maximumPositionSteps, positionSteps);
     }
 
     std::fprintf(stderr,
-                 "deci-RPM feedback target position=%.3f peak=%.3f speed=%.3f\n",
+                 "integer-RPM feedback target position=%.3f peak=%.3f speed=%.3f\n",
                  positionSteps, maximumPositionSteps, physicalSpeedRpm);
     assert(std::abs(positionSteps - 34.0) < 6.0);
     assert(maximumPositionSteps < 48.0);
@@ -240,11 +281,13 @@ void testSmallTargetWithDeciRpmZdtFeedback()
 int main()
 {
     testVelocityFrame();
-    testTrapezoidalRelativeFrame();
+    testRelativePositionFrame();
+    testDriverParameterResponse();
+    testIntegerRpmQuantizer();
     testCascadedController();
     testSmallPipeAngleTarget();
-    testLowSpeedFeedbackAndDeciRpmProtocol();
-    testSmallTargetWithDeciRpmZdtFeedback();
+    testLowSpeedFeedbackWithIntegerRpmProtocol();
+    testSmallTargetWithIntegerRpmZdtFeedback();
     std::puts("motor velocity controller tests passed");
     return 0;
 }

@@ -60,11 +60,97 @@ void printUsage(const char* program)
         "  %s disable\n"
         "\n"
         "Moves are relative motor-shaft angles, limited to %.1f..%.1f degrees.\n"
-        "Default motion: %.1f RPM, %u RPM/s acceleration and deceleration.\n",
+        "Default motion: %.1f RPM, %u RPM/s physical acceleration.\n",
         program, program, program, program, program, program, program, program,
         MANUAL_MINIMUM_DEGREES, MANUAL_MAXIMUM_DEGREES,
         MANUAL_MAXIMUM_RPM,
         static_cast<unsigned>(MANUAL_ACCELERATION_RPM_S));
+}
+
+template <std::size_t Size>
+void printFrame(const std::array<uint8_t, Size>& frame)
+{
+    std::printf("tx_frame=");
+    for (std::size_t index = 0; index < frame.size(); ++index) {
+        std::printf("%s%02X", index == 0 ? "" : " ",
+                    static_cast<unsigned>(frame[index]));
+    }
+    std::printf("\n");
+}
+
+const char* pulseControlModeName(uint8_t mode)
+{
+    if (mode == 0x00) return "PUL_OPEN";
+    if (mode == 0x01) return "PUL_FOC";
+    if (mode == 0x02) return "PUL_FOC";
+    return "UNKNOWN";
+}
+
+const char* serialFunctionName(uint8_t mode)
+{
+    if (mode == 0x00) return "RxTx_OFF";
+    if (mode == 0x01) return "ESI_ALO";
+    if (mode == 0x02) return "UART_FUN";
+    if (mode == 0x03) return "CAN1_MAP";
+    return "UNKNOWN";
+}
+
+const char* responseModeName(uint8_t mode)
+{
+    if (mode == 0x00) return "None";
+    if (mode == 0x01) return "Receive";
+    if (mode == 0x02) return "Reached";
+    if (mode == 0x03) return "Both";
+    if (mode == 0x04) return "Other";
+    return "UNKNOWN";
+}
+
+bool readAndPrintDriverInfo(EmmV5Motor& motor)
+{
+    ZdtDriverParameters parameters;
+    uint16_t firmwareVersion = 0;
+    uint16_t hardwareVersion = 0;
+    if (!motor.readVersion(firmwareVersion, hardwareVersion)) {
+        std::fprintf(stderr,
+            "ERROR: failed to read Emm V5 firmware version\n");
+        return false;
+    }
+    if (!motor.readDriverParameters(parameters)) {
+        std::fprintf(stderr,
+            "ERROR: failed to read Emm V5 driver configuration\n");
+        return false;
+    }
+
+    const bool immediateAck = parameters.responseMode == 0x01 ||
+                              parameters.responseMode == 0x03;
+    if (!motor.configureDriverParameters(parameters)) return false;
+    motor.setExpectCommandAck(immediateAck);
+
+    const double motorStepDegrees = parameters.motorType == 25 ? 1.8 :
+                                    parameters.motorType == 50 ? 0.9 : 0.0;
+
+    std::printf(
+        "driver firmware=%u hardware=%u motor_type=%u(%.1f_deg) "
+        "pulse_mode=%u(%s) "
+        "p_serial=%u(%s) en_mode=%u mstep=%u uart_baud_index=%u "
+        "checksum=%u response=%u(%s) command_ppr=%u ack_expected=%d\n",
+        static_cast<unsigned>(firmwareVersion),
+        static_cast<unsigned>(hardwareVersion),
+        static_cast<unsigned>(parameters.motorType), motorStepDegrees,
+        static_cast<unsigned>(parameters.pulseControlMode),
+        pulseControlModeName(parameters.pulseControlMode),
+        static_cast<unsigned>(parameters.serialPortFunction),
+        serialFunctionName(parameters.serialPortFunction),
+        static_cast<unsigned>(parameters.enableMode),
+        static_cast<unsigned>(parameters.microstep),
+        static_cast<unsigned>(parameters.uartBaudIndex),
+        static_cast<unsigned>(parameters.checksumMode),
+        static_cast<unsigned>(parameters.responseMode),
+        responseModeName(parameters.responseMode),
+        static_cast<unsigned>(
+            motor.positionCommandPulsesPerRevolution()),
+        immediateAck ? 1 : 0);
+    return true;
 }
 
 bool parseDegrees(const char* text, double& value)
@@ -80,22 +166,36 @@ bool readStatus(EmmV5Motor& motor,
                 const AppConfig& config,
                 ZdtMotionState& motion,
                 uint8_t& motorStatus,
-                uint8_t& originStatus)
+                uint8_t& originStatus,
+                ZdtPositionState* positionState = nullptr)
 {
+    ZdtPositionState positions;
+    double busVoltage = 0.0;
+    uint16_t phaseCurrentMilliamps = 0;
     if (!motor.readMotionState(motion) ||
+        !motor.readPositionState(positions) ||
+        !motor.readBusVoltageVolts(busVoltage) ||
+        !motor.readPhaseCurrentMilliamps(phaseCurrentMilliamps) ||
         !motor.readMotorStatus(motorStatus) ||
         !motor.readOriginStatus(originStatus)) {
         std::fprintf(stderr, "ERROR: failed to read ZDT status\n");
         return false;
     }
 
+    if (positionState) *positionState = positions;
+
     const double motorDegrees = motion.positionSteps * 360.0 /
         static_cast<double>(config.pulsesPerRevolution);
     std::printf(
-        "position_steps=%+.1f estimated_motor_deg=%+.2f speed_rpm=%+.1f "
+        "position_steps=%+.1f pulse_est_deg=%+.2f actual_deg=%+.1f "
+        "target_deg=%+.1f trajectory_deg=%+.1f speed_rpm=%+.1f "
+        "bus_v=%.2f phase_ma=%u "
         "enabled=%d arrived=%d stall=%d protect=%d "
         "encoder_ready=%d calibration_ready=%d\n",
-        motion.positionSteps, motorDegrees, motion.speedRpm,
+        motion.positionSteps, motorDegrees, positions.actualDegrees,
+        positions.targetDegrees, positions.realtimeTargetDegrees,
+        motion.speedRpm, busVoltage,
+        static_cast<unsigned>(phaseCurrentMilliamps),
         (motorStatus & ZDT_STATUS_ENABLED) ? 1 : 0,
         (motorStatus & ZDT_STATUS_ARRIVED) ? 1 : 0,
         (motorStatus & ZDT_STATUS_STALL) ? 1 : 0,
@@ -112,8 +212,10 @@ int runMove(EmmV5Motor& motor,
     ZdtMotionState initialMotion;
     uint8_t initialStatus = 0;
     uint8_t originStatus = 0;
+    ZdtPositionState initialPosition;
     if (!readStatus(
-            motor, config, initialMotion, initialStatus, originStatus)) {
+            motor, config, initialMotion, initialStatus, originStatus,
+            &initialPosition)) {
         return 1;
     }
     if (initialStatus & (ZDT_STATUS_STALL | ZDT_STATUS_STALL_PROTECTION)) {
@@ -141,19 +243,49 @@ int runMove(EmmV5Motor& motor,
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
 
+    const uint32_t commandPpr =
+        motor.positionCommandPulsesPerRevolution();
+    const uint32_t commandPulses = static_cast<uint32_t>(std::llround(
+        std::abs(signedDegrees) * static_cast<double>(commandPpr) / 360.0));
+    const uint8_t accelerationLevel =
+        makeEmmV5AccelerationLevel(MANUAL_ACCELERATION_RPM_S);
+    const auto frame = makeEmmV5RelativePositionFrame(
+        static_cast<uint8_t>(config.motorAddress), signedDegrees,
+        MANUAL_MAXIMUM_RPM, MANUAL_ACCELERATION_RPM_S, commandPpr);
+    printFrame(frame);
+
     if (!motor.moveRelativeDegrees(
             signedDegrees,
             MANUAL_MAXIMUM_RPM,
-            MANUAL_ACCELERATION_RPM_S,
             MANUAL_ACCELERATION_RPM_S)) {
         std::fprintf(stderr, "ERROR: 0xFD position command failed\n");
         return 1;
     }
 
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    ZdtPositionState acceptedPosition;
+    if (!motor.readPositionState(acceptedPosition)) {
+        std::fprintf(stderr,
+            "ERROR: failed to read position registers after 0xFD\n");
+        return 1;
+    }
+
+    const double expectedTargetDegrees =
+        initialPosition.actualDegrees + signedDegrees;
+
     std::printf(
-        "move_sent relative_motor_deg=%+.1f max_rpm=%.1f accel_rpm_s=%u\n",
-        signedDegrees, MANUAL_MAXIMUM_RPM,
-        static_cast<unsigned>(MANUAL_ACCELERATION_RPM_S));
+        "move_sent relative_motor_deg=%+.1f command_pulses=%u "
+        "command_ppr=%u max_rpm=%.1f accel_rpm_s=%u accel_level=%u "
+        "target_before=%+.1f target_after=%+.1f expected_target=%+.1f "
+        "trajectory_after=%+.1f actual_after=%+.1f\n",
+        signedDegrees, static_cast<unsigned>(commandPulses),
+        static_cast<unsigned>(commandPpr), MANUAL_MAXIMUM_RPM,
+        static_cast<unsigned>(MANUAL_ACCELERATION_RPM_S),
+        static_cast<unsigned>(accelerationLevel),
+        initialPosition.targetDegrees, acceptedPosition.targetDegrees,
+        expectedTargetDegrees, acceptedPosition.realtimeTargetDegrees,
+        acceptedPosition.actualDegrees);
 
     const double nominalSeconds = std::abs(signedDegrees) /
         (MANUAL_MAXIMUM_RPM * 6.0);
@@ -185,25 +317,33 @@ int runMove(EmmV5Motor& motor,
             ZdtMotionState finalMotion;
             uint8_t finalStatus = 0;
             uint8_t finalOriginStatus = 0;
+            ZdtPositionState finalPosition;
             if (!readStatus(motor, config, finalMotion,
-                            finalStatus, finalOriginStatus)) {
+                            finalStatus, finalOriginStatus,
+                            &finalPosition)) {
                 return 1;
             }
 
-            const double expectedSteps = std::abs(signedDegrees) /
-                360.0 * config.pulsesPerRevolution;
-            const double actualSteps = std::abs(
-                finalMotion.positionSteps - initialMotion.positionSteps);
-            const double minimumProgress = std::max(0.5, expectedSteps * 0.4);
-            if (actualSteps < minimumProgress) {
+            const double actualDegrees = std::abs(
+                finalPosition.actualDegrees - initialPosition.actualDegrees);
+            const double minimumProgressDegrees =
+                std::max(0.2, std::abs(signedDegrees) * 0.4);
+            if (actualDegrees < minimumProgressDegrees) {
                 std::fprintf(stderr,
-                    "ERROR: command reported arrived but position changed only %.1f steps\n",
-                    actualSteps);
+                    "ERROR: arrived without motion: target_delta=%+.1f deg "
+                    "actual_delta=%+.1f deg pulse_delta=%+.1f\n",
+                    acceptedPosition.targetDegrees -
+                        initialPosition.targetDegrees,
+                    finalPosition.actualDegrees -
+                        initialPosition.actualDegrees,
+                    finalMotion.positionSteps - initialMotion.positionSteps);
                 return 1;
             }
             std::printf(
-                "move_complete requested_deg=%+.1f delta_steps=%+.1f elapsed_s=%.3f\n",
+                "move_complete requested_deg=%+.1f actual_delta_deg=%+.1f "
+                "pulse_delta=%+.1f elapsed_s=%.3f\n",
                 signedDegrees,
+                finalPosition.actualDegrees - initialPosition.actualDegrees,
                 finalMotion.positionSteps - initialMotion.positionSteps,
                 elapsed);
             return 0;
@@ -270,6 +410,11 @@ int main(int argc, char** argv)
     SerialPort serial;
     if (!serial.openPort(config.serialPort, config.serialBaud)) return 1;
     EmmV5Motor motor(serial, config);
+
+    const bool needsDriverInfo =
+        command == "status" || command == "move" ||
+        command == "up" || command == "down";
+    if (needsDriverInfo && !readAndPrintDriverInfo(motor)) return 1;
 
     if (command == "move" || command == "up" || command == "down") {
         return runMove(motor, config, signedDegrees);

@@ -35,7 +35,7 @@ echo "Building on Linux ${architecture} with g++ ${compiler_version}"
 opencv_flags=( $(pkg-config --cflags --libs opencv4) )
 common_flags=(-std=c++17 -Wall -Wextra -Wpedantic -pthread)
 
-# 先在树莓派本机验证0xF6报文、软限位和位置/速度/加速度串级环。
+# 先在树莓派本机验证Emm V5报文、软限位和位置/速度/加速度串级环。
 g++ -O2 "${common_flags[@]}" motor_velocity_control_test.cpp \
     -o motor_velocity_control_test "${opencv_flags[@]}"
 ./motor_velocity_control_test
@@ -54,4 +54,4 @@ g++ -O3 -DNDEBUG "${common_flags[@]}" main.cpp \
 
 echo "Build complete: ./ball2_task3_velocity"
 echo "Manual motor CLI: ./motor_cli --help"
-echo "  ZDT: 0xF6 velocity mode + 0x35 speed + 0x30 pulse position"
+echo "  Emm V5: 0xF6 integer-RPM velocity + 0x35 speed + 0x36 position"

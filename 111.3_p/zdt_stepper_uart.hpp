@@ -11,7 +11,7 @@
 //   -> 加速度/跃度限制 -> 0xF6速度模式
 //   -> ZDT内部20kHz速度闭环
 //
-// 0x35和0x30分别读取实时转速与实时脉冲数。速度模式不再依靠软件积分猜位置，
+// 0x35和0x36分别读取实时转速与编码器位置。速度模式不再依靠软件积分猜位置，
 // 因而反向间隙、负载扰动和闭环步进的追赶动作都能反映到下一次控制计算中。
 // ============================================================================
 
@@ -39,71 +39,80 @@
 namespace ball_stepper {
 
 inline constexpr uint8_t ZDT_TAIL = 0x6B;
-inline constexpr double ZDT_SPEED_UNITS_PER_RPM = 10.0;
-inline constexpr double ZDT_ANGLE_UNITS_PER_DEGREE = 10.0;
+inline constexpr double EMM_V5_POSITION_UNITS_PER_REVOLUTION = 65536.0;
 inline constexpr uint8_t ZDT_STATUS_ENABLED = 0x01;
 inline constexpr uint8_t ZDT_STATUS_ARRIVED = 0x02;
 inline constexpr uint8_t ZDT_STATUS_STALL = 0x04;
 inline constexpr uint8_t ZDT_STATUS_STALL_PROTECTION = 0x08;
 
-inline std::array<uint8_t, 9> makeZdtVelocityFrame(
+inline uint8_t makeEmmV5AccelerationLevel(double rpmPerSecond)
+{
+    if (!std::isfinite(rpmPerSecond) || rpmPerSecond <= 0.0) return 0;
+    const double level = 256.0 - 20000.0 / rpmPerSecond;
+    return static_cast<uint8_t>(std::clamp(
+        static_cast<int>(std::lround(level)), 1, 255));
+}
+
+inline double emmV5AccelerationRpmS(uint8_t level)
+{
+    if (level == 0) return std::numeric_limits<double>::infinity();
+    return 20000.0 / (256.0 - static_cast<double>(level));
+}
+
+inline std::array<uint8_t, 8> makeEmmV5VelocityFrame(
     uint8_t address,
     double signedRpm,
     uint16_t maximumRpm,
-    uint16_t speedSlopeRpmS)
+    uint16_t accelerationRpmS)
 {
     const double limited = std::clamp(
         signedRpm,
         -static_cast<double>(maximumRpm),
          static_cast<double>(maximumRpm));
-    const uint16_t magnitudeDeciRpm = static_cast<uint16_t>(std::lround(
-        std::abs(limited) * ZDT_SPEED_UNITS_PER_RPM));
+    const uint16_t magnitudeRpm = static_cast<uint16_t>(std::lround(
+        std::abs(limited)));
     return {
         address,
         0xF6,
         limited >= 0.0 ? uint8_t{0x00} : uint8_t{0x01},
-        static_cast<uint8_t>((speedSlopeRpmS >> 8) & 0xFF),
-        static_cast<uint8_t>(speedSlopeRpmS & 0xFF),
-        static_cast<uint8_t>((magnitudeDeciRpm >> 8) & 0xFF),
-        static_cast<uint8_t>(magnitudeDeciRpm & 0xFF),
+        static_cast<uint8_t>((magnitudeRpm >> 8) & 0xFF),
+        static_cast<uint8_t>(magnitudeRpm & 0xFF),
+        makeEmmV5AccelerationLevel(accelerationRpmS),
         0x00,
         ZDT_TAIL
     };
 }
 
-inline std::array<uint8_t, 16> makeZdtTrapezoidalRelativeFrame(
+inline std::array<uint8_t, 13> makeEmmV5RelativePositionFrame(
     uint8_t address,
     double signedDegrees,
     double maximumRpm,
     uint16_t accelerationRpmS,
-    uint16_t decelerationRpmS)
+    uint32_t commandPulsesPerRevolution)
 {
     const double maximumDegrees =
-        static_cast<double>(std::numeric_limits<uint32_t>::max()) /
-        ZDT_ANGLE_UNITS_PER_DEGREE;
+        static_cast<double>(std::numeric_limits<uint32_t>::max()) * 360.0 /
+        static_cast<double>(std::max(uint32_t{1},
+                                     commandPulsesPerRevolution));
     const double limitedDegrees = std::clamp(
         signedDegrees, -maximumDegrees, maximumDegrees);
-    const uint32_t magnitudeDeciDegrees = static_cast<uint32_t>(
-        std::llround(std::abs(limitedDegrees) *
-                     ZDT_ANGLE_UNITS_PER_DEGREE));
-    const double limitedRpm = std::clamp(maximumRpm, 0.1, 3000.0);
-    const uint16_t magnitudeDeciRpm = static_cast<uint16_t>(std::lround(
-        limitedRpm * ZDT_SPEED_UNITS_PER_RPM));
+    const uint32_t magnitudePulses = static_cast<uint32_t>(std::llround(
+        std::abs(limitedDegrees) *
+        static_cast<double>(commandPulsesPerRevolution) / 360.0));
+    const uint16_t magnitudeRpm = static_cast<uint16_t>(std::lround(
+        std::clamp(maximumRpm, 1.0, 3000.0)));
 
     return {
         address,
         0xFD,
         limitedDegrees >= 0.0 ? uint8_t{0x00} : uint8_t{0x01},
-        static_cast<uint8_t>((accelerationRpmS >> 8) & 0xFF),
-        static_cast<uint8_t>(accelerationRpmS & 0xFF),
-        static_cast<uint8_t>((decelerationRpmS >> 8) & 0xFF),
-        static_cast<uint8_t>(decelerationRpmS & 0xFF),
-        static_cast<uint8_t>((magnitudeDeciRpm >> 8) & 0xFF),
-        static_cast<uint8_t>(magnitudeDeciRpm & 0xFF),
-        static_cast<uint8_t>((magnitudeDeciDegrees >> 24) & 0xFF),
-        static_cast<uint8_t>((magnitudeDeciDegrees >> 16) & 0xFF),
-        static_cast<uint8_t>((magnitudeDeciDegrees >> 8) & 0xFF),
-        static_cast<uint8_t>(magnitudeDeciDegrees & 0xFF),
+        static_cast<uint8_t>((magnitudeRpm >> 8) & 0xFF),
+        static_cast<uint8_t>(magnitudeRpm & 0xFF),
+        makeEmmV5AccelerationLevel(accelerationRpmS),
+        static_cast<uint8_t>((magnitudePulses >> 24) & 0xFF),
+        static_cast<uint8_t>((magnitudePulses >> 16) & 0xFF),
+        static_cast<uint8_t>((magnitudePulses >> 8) & 0xFF),
+        static_cast<uint8_t>(magnitudePulses & 0xFF),
         0x00,
         0x00,
         ZDT_TAIL
@@ -280,11 +289,53 @@ struct ZdtMotionState {
     double speedRpm = 0.0;
 };
 
+struct ZdtPositionState {
+    double targetDegrees = 0.0;
+    double realtimeTargetDegrees = 0.0;
+    double actualDegrees = 0.0;
+};
+
+struct ZdtDriverParameters {
+    uint8_t motorType = 0;
+    uint8_t pulseControlMode = 0;
+    uint8_t serialPortFunction = 0;
+    uint8_t enableMode = 0;
+    uint8_t directionMode = 0;
+    uint8_t microstep = 0;
+    uint8_t uartBaudIndex = 0;
+    uint8_t checksumMode = 0;
+    uint8_t responseMode = 0;
+};
+
+inline bool decodeZdtDriverParametersResponse(
+    const std::array<uint8_t, 33>& response,
+    uint8_t expectedAddress,
+    ZdtDriverParameters& parameters)
+{
+    if (response[0] != expectedAddress || response[1] != 0x42 ||
+        response[2] != 0x21 || response[3] != 0x15 ||
+        response.back() != ZDT_TAIL) {
+        return false;
+    }
+    parameters.motorType = response[4];
+    parameters.pulseControlMode = response[5];
+    parameters.serialPortFunction = response[6];
+    parameters.enableMode = response[7];
+    parameters.directionMode = response[8];
+    parameters.microstep = response[9];
+    parameters.uartBaudIndex = response[18];
+    parameters.checksumMode = response[21];
+    parameters.responseMode = response[22];
+    return true;
+}
+
 class EmmV5Motor {
     SerialPort& serial_;
     uint8_t address_ = 1;
     uint16_t maximumRpm_ = 8;
     uint16_t speedSlopeRpmS_ = 60;
+    int pulsesPerRevolution_ = 200;
+    uint32_t positionCommandPulsesPerRevolution_ = 3200;
     int replyTimeoutMs_ = 15;
     bool expectCommandAck_ = true;
 
@@ -387,6 +438,34 @@ class EmmV5Motor {
         return true;
     }
 
+    bool readPositionDegreesRegister(uint8_t commandCode, double& degrees)
+    {
+        const uint8_t command[] = {address_, commandCode, ZDT_TAIL};
+        uint8_t response[8]{};
+        if (!exchange(command, sizeof(command), commandCode,
+                      response, sizeof(response), true)) {
+            return false;
+        }
+        const int64_t positionUnits = decodeSignedMagnitude(
+            response[2], response + 3, 4);
+        degrees = static_cast<double>(positionUnits) * 360.0 /
+            EMM_V5_POSITION_UNITS_PER_REVOLUTION;
+        return true;
+    }
+
+    bool readUnsigned16Register(uint8_t commandCode, uint16_t& value)
+    {
+        const uint8_t command[] = {address_, commandCode, ZDT_TAIL};
+        uint8_t response[5]{};
+        if (!exchange(command, sizeof(command), commandCode,
+                      response, sizeof(response), true)) {
+            return false;
+        }
+        value = static_cast<uint16_t>(
+            (static_cast<uint16_t>(response[2]) << 8) | response[3]);
+        return true;
+    }
+
 public:
     EmmV5Motor(SerialPort& serial, const AppConfig& config)
         : serial_(serial),
@@ -396,8 +475,68 @@ public:
               std::clamp(config.motorRpm, 1, 3000))),
           speedSlopeRpmS_(static_cast<uint16_t>(
               std::clamp(config.motorSpeedSlopeRpmS, 1, 65535))),
+          pulsesPerRevolution_(config.pulsesPerRevolution),
           replyTimeoutMs_(config.motorReplyTimeoutMs),
           expectCommandAck_(config.motorExpectCommandAck) {}
+
+    void setExpectCommandAck(bool expectCommandAck)
+    {
+        expectCommandAck_ = expectCommandAck;
+    }
+
+    bool readDriverParameters(ZdtDriverParameters& parameters)
+    {
+        const uint8_t command[] = {address_, 0x42, 0x6C, ZDT_TAIL};
+        std::array<uint8_t, 33> response{};
+        if (!exchange(command, sizeof(command), 0x42,
+                      response.data(), response.size(), true)) {
+            return false;
+        }
+        if (!decodeZdtDriverParametersResponse(
+                response, address_, parameters)) {
+            std::fprintf(stderr, "invalid ZDT driver parameter response\n");
+            return false;
+        }
+        return true;
+    }
+
+    bool configureDriverParameters(const ZdtDriverParameters& parameters)
+    {
+        const uint32_t fullStepsPerRevolution =
+            parameters.motorType == 25 ? 200u :
+            parameters.motorType == 50 ? 400u : 0u;
+        const uint32_t microsteps =
+            parameters.microstep == 0 ? 256u : parameters.microstep;
+        if (fullStepsPerRevolution == 0 || microsteps == 0) {
+            std::fprintf(stderr,
+                "unsupported Emm V5 motor type=%u microstep=%u\n",
+                static_cast<unsigned>(parameters.motorType),
+                static_cast<unsigned>(parameters.microstep));
+            return false;
+        }
+        positionCommandPulsesPerRevolution_ =
+            fullStepsPerRevolution * microsteps;
+        return true;
+    }
+
+    uint32_t positionCommandPulsesPerRevolution() const
+    {
+        return positionCommandPulsesPerRevolution_;
+    }
+
+    bool readVersion(uint16_t& firmwareVersion, uint16_t& hardwareVersion)
+    {
+        const uint8_t command[] = {address_, 0x1F, ZDT_TAIL};
+        // Emm V5 returns one byte each for firmware and hardware versions.
+        uint8_t response[5]{};
+        if (!exchange(command, sizeof(command), 0x1F,
+                      response, sizeof(response), true)) {
+            return false;
+        }
+        firmwareVersion = response[2];
+        hardwareVersion = response[3];
+        return true;
+    }
 
     bool setEnabled(bool enabled)
     {
@@ -434,13 +573,12 @@ public:
             signedRpm,
             -static_cast<double>(maximumRpm_),
              static_cast<double>(maximumRpm_));
-        return std::round(limited * ZDT_SPEED_UNITS_PER_RPM) /
-            ZDT_SPEED_UNITS_PER_RPM;
+        return std::round(limited);
     }
 
     bool setVelocityRpm(double signedRpm)
     {
-        const auto frame = makeZdtVelocityFrame(
+        const auto frame = makeEmmV5VelocityFrame(
             address_, quantizeVelocityRpm(signedRpm), maximumRpm_,
             speedSlopeRpmS_);
         return sendControlCommand(frame.data(), frame.size(), 0xF6);
@@ -448,12 +586,11 @@ public:
 
     bool moveRelativeDegrees(double signedDegrees,
                              double maximumRpm,
-                             uint16_t accelerationRpmS,
-                             uint16_t decelerationRpmS)
+                             uint16_t accelerationRpmS)
     {
-        const auto frame = makeZdtTrapezoidalRelativeFrame(
+        const auto frame = makeEmmV5RelativePositionFrame(
             address_, signedDegrees, maximumRpm,
-            accelerationRpmS, decelerationRpmS);
+            accelerationRpmS, positionCommandPulsesPerRevolution_);
         return sendControlCommand(frame.data(), frame.size(), 0xFD);
     }
 
@@ -466,22 +603,52 @@ public:
             return false;
         }
         signedRpm = static_cast<double>(decodeSignedMagnitude(
-            response[2], response + 3, 2)) / ZDT_SPEED_UNITS_PER_RPM;
+            response[2], response + 3, 2));
         return true;
     }
 
     bool readRealtimePositionSteps(double& positionSteps)
     {
-        const uint8_t command[] = {address_, 0x30, ZDT_TAIL};
+        const uint8_t command[] = {address_, 0x36, ZDT_TAIL};
         uint8_t response[8]{};
-        if (!exchange(command, sizeof(command), 0x30,
+        if (!exchange(command, sizeof(command), 0x36,
                       response, sizeof(response), true)) {
             return false;
         }
-        const int64_t positionStepsRaw = decodeSignedMagnitude(
+        const int64_t positionUnits = decodeSignedMagnitude(
             response[2], response + 3, 4);
-        positionSteps = static_cast<double>(positionStepsRaw);
+        positionSteps = static_cast<double>(positionUnits) *
+            static_cast<double>(pulsesPerRevolution_) /
+            EMM_V5_POSITION_UNITS_PER_REVOLUTION;
         return true;
+    }
+
+    bool readTargetPositionDegrees(double& degrees)
+    {
+        return readPositionDegreesRegister(0x33, degrees);
+    }
+
+    bool readRealtimeTargetPositionDegrees(double& degrees)
+    {
+        return readPositionDegreesRegister(0x34, degrees);
+    }
+
+    bool readRealtimePositionDegrees(double& degrees)
+    {
+        return readPositionDegreesRegister(0x36, degrees);
+    }
+
+    bool readBusVoltageVolts(double& volts)
+    {
+        uint16_t millivolts = 0;
+        if (!readUnsigned16Register(0x24, millivolts)) return false;
+        volts = static_cast<double>(millivolts) / 1000.0;
+        return true;
+    }
+
+    bool readPhaseCurrentMilliamps(uint16_t& milliamps)
+    {
+        return readUnsigned16Register(0x27, milliamps);
     }
 
     bool readMotorStatus(uint8_t& status)
@@ -498,6 +665,14 @@ public:
     {
         return readRealtimePositionSteps(state.positionSteps) &&
                readRealtimeSpeedRpm(state.speedRpm);
+    }
+
+    bool readPositionState(ZdtPositionState& state)
+    {
+        return readTargetPositionDegrees(state.targetDegrees) &&
+               readRealtimeTargetPositionDegrees(
+                   state.realtimeTargetDegrees) &&
+               readRealtimePositionDegrees(state.actualDegrees);
     }
 };
 
@@ -548,10 +723,10 @@ public:
             (static_cast<double>(config_.pulsesPerRevolution) * boundedDt);
         previousPositionSteps_ = positionSteps;
 
-        // 0x35 has 0.1 RPM resolution. A reported zero can still mean a
-        // sub-0.05 RPM motion, so use the pulse-position estimate then.
+        // Emm V5 0x35 has integer-RPM resolution. Use encoder position
+        // changes below 1 RPM so the inner loop can still see slow motion.
         const double speedSampleRpm = std::clamp(
-            std::abs(reportedSpeedRpm) >= 0.05 ?
+            std::abs(reportedSpeedRpm) >= 0.5 ?
                 reportedSpeedRpm : encoderSpeedRpm,
             -static_cast<double>(config_.motorRpm),
              static_cast<double>(config_.motorRpm));
@@ -560,6 +735,41 @@ public:
         filteredSpeedRpm_ += alpha *
             (speedSampleRpm - filteredSpeedRpm_);
         return filteredSpeedRpm_;
+    }
+};
+
+class VelocityCommandQuantizer {
+    double fractionalRpm_ = 0.0;
+    int direction_ = 0;
+
+public:
+    void reset()
+    {
+        fractionalRpm_ = 0.0;
+        direction_ = 0;
+    }
+
+    double update(double requestedRpm)
+    {
+        if (std::abs(requestedRpm) < 1e-9) {
+            reset();
+            return 0.0;
+        }
+
+        const int direction = requestedRpm > 0.0 ? 1 : -1;
+        if (direction != direction_) {
+            fractionalRpm_ = 0.0;
+            direction_ = direction;
+        }
+
+        const double magnitude = std::abs(requestedRpm);
+        double integerRpm = std::floor(magnitude);
+        fractionalRpm_ += magnitude - integerRpm;
+        if (fractionalRpm_ >= 1.0) {
+            integerRpm += 1.0;
+            fractionalRpm_ -= 1.0;
+        }
+        return static_cast<double>(direction) * integerRpm;
     }
 };
 
@@ -663,6 +873,7 @@ class MotorCommander {
     EmmV5Motor& motor_;
     VelocityModePositionController controller_;
     EncoderSpeedEstimator speedEstimator_;
+    VelocityCommandQuantizer velocityQuantizer_;
     int minimumIntervalMs_ = 33;
     int targetSteps_ = 0;
     int64_t lastCycleMs_ = 0;
@@ -680,7 +891,7 @@ class MotorCommander {
             state.positionSteps, state.speedRpm, dt);
         telemetry_ = controller_.update(
             targetSteps_, state.positionSteps, feedbackSpeedRpm, dt);
-        telemetry_.wireCommandSpeedRpm = motor_.quantizeVelocityRpm(
+        telemetry_.wireCommandSpeedRpm = velocityQuantizer_.update(
             telemetry_.commandSpeedRpm);
         if (!motor_.setVelocityRpm(telemetry_.wireCommandSpeedRpm)) {
             return false;
@@ -721,11 +932,13 @@ public:
             if (!runCycle(millisecondsNow())) return false;
             if (telemetry_.atTarget) {
                 controller_.reset();
+                velocityQuantizer_.reset();
                 return motor_.setVelocityRpm(0.0);
             }
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(minimumIntervalMs_));
         }
+        velocityQuantizer_.reset();
         motor_.setVelocityRpm(0.0);
         return false;
     }
