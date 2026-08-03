@@ -119,7 +119,7 @@ public:
 
     Task3MotionCommand update(Task3Phase phase,
                               double errorCm,
-                              double speedCmS,
+                              double twoFrameSpeedCmS,
                               double dtSeconds)
     {
         Task3MotionCommand command;
@@ -140,14 +140,15 @@ public:
         command.proportionalAngleDeg =
             command.positionKpDegPerCm * errorCm;
         command.derivativeAngleDeg =
-            config_.task3VelocityKdDegPerCmS * speedCmS;
+            config_.task3VelocityKdDegPerCmS * twoFrameSpeedCmS;
 
         const bool targetActive = phase != Task3Phase::Ready;
         const bool insideIntegralPositionWindow =
             targetActive &&
             std::abs(errorCm) <= config_.task3IntegralZoneCm;
         const bool slowEnoughToIntegrate =
-            std::abs(speedCmS) <= config_.task3IntegralSpeedLimitCmS;
+            std::abs(twoFrameSpeedCmS) <=
+                config_.task3IntegralSpeedLimitCmS;
 
         // I is deliberately limited to the final approach around either target.
         // A target change clears it, so it cannot carry bias across the reversal.
@@ -203,7 +204,8 @@ public:
         const bool largeUnresolvedError =
             std::abs(errorCm) >= config_.task3BreakawayErrorCm;
         const bool ballNearlyStopped =
-            std::abs(speedCmS) <= config_.task3BreakawaySpeedCmS;
+            std::abs(twoFrameSpeedCmS) <=
+                config_.task3BreakawaySpeedCmS;
         const bool baseStillDrivesTowardTarget =
             desiredDirection != 0 &&
             baseAngleDeg * static_cast<double>(desiredDirection) > 0.0;

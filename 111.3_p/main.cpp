@@ -164,12 +164,12 @@ ball_stepper::AppConfig makeUserConfig()
     config.task3MoveLeftPositionKpDegPerCm = 0.035;
     config.task3VelocityKdDegPerCmS = 0.040;
 
-    // I opens only inside the final 0.80 cm window and below 1.2 cm/s. Its
-    // maximum output is 0.120 * 0.90 = 0.108 deg, so P still dominates.
-    config.task3IntegralKiDegPerCmSecond = 0.120;
-    config.task3IntegralZoneCm = 0.80;
-    config.task3IntegralSpeedLimitCmS = 1.2;
-    config.task3IntegralLimitCmSeconds = 0.90;
+    // I opens only during the slower final 3 cm. Its maximum output is
+    // 0.300 * 0.60 = 0.180 deg and every target reversal clears it.
+    config.task3IntegralKiDegPerCmSecond = 0.300;
+    config.task3IntegralZoneCm = 3.00;
+    config.task3IntegralSpeedLimitCmS = 0.8;
+    config.task3IntegralLimitCmSeconds = 0.60;
 
     // Breakaway overlaps the final I window, avoiding the old 0.5-1.0 cm gap
     // where neither compensation was active. It decays as soon as motion is

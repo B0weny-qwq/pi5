@@ -684,7 +684,7 @@ inline int runTask3App(const AppConfig& config)
             errorCm = positionCm - targetCm;
 
             motionCommand = motionController.update(
-                task3.phase(), errorCm, speedCmS, loopDt);
+                task3.phase(), errorCm, rawTwoFrameSpeedCmS, loopDt);
             requestedAngleDeg = motionCommand.angleDeg;
             angleAtLastMeasurementDeg = requestedAngleDeg;
             lastMeasurementTime = now;

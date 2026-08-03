@@ -52,10 +52,10 @@ AppConfig makePdiConfig()
     config.task3MoveRightPositionKpDegPerCm = 0.300;
     config.task3MoveLeftPositionKpDegPerCm = 0.035;
     config.task3VelocityKdDegPerCmS = 0.040;
-    config.task3IntegralKiDegPerCmSecond = 0.120;
-    config.task3IntegralZoneCm = 0.80;
-    config.task3IntegralSpeedLimitCmS = 1.2;
-    config.task3IntegralLimitCmSeconds = 0.90;
+    config.task3IntegralKiDegPerCmSecond = 0.300;
+    config.task3IntegralZoneCm = 3.00;
+    config.task3IntegralSpeedLimitCmS = 0.8;
+    config.task3IntegralLimitCmSeconds = 0.60;
     config.task3BreakawayErrorCm = 0.35;
     config.task3BreakawaySpeedCmS = 0.35;
     config.task3BreakawayDelaySeconds = 0.08;
@@ -137,13 +137,23 @@ void testPdiMotionController()
     assert(finalCommand.mode == Task3MotionMode::HoldPdi);
     assert(finalCommand.integralWindowActive);
     assert(finalCommand.integralAngleDeg > 0.0);
-    assert(finalCommand.integralAngleDeg < 0.09 + 1e-9);
+    assert(finalCommand.integralAngleDeg < 0.19 + 1e-9);
     assert(finalCommand.angleDeg > finalCommand.proportionalAngleDeg);
 
     const Task3MotionCommand outsideIntegralWindow = controller.update(
-        Task3Phase::HoldNegative, 0.90, 0.0, 0.01);
+        Task3Phase::HoldNegative, 3.10, 0.0, 0.01);
     assert(!outsideIntegralWindow.integralWindowActive);
     assert(std::abs(outsideIntegralWindow.integralAngleDeg) < 1e-12);
+
+    Task3MotionController residualIntegralController(config);
+    Task3MotionCommand residualCommand;
+    for (int index = 0; index < 10; ++index) {
+        residualCommand = residualIntegralController.update(
+            Task3Phase::MoveToNegative, 2.6, 0.0, 0.10);
+    }
+    assert(residualCommand.integralWindowActive);
+    assert(residualCommand.integralAngleDeg > 0.17);
+    assert(residualCommand.integralAngleDeg <= 0.18 + 1e-9);
 
     // A large error with no measured ball response gradually expands the
     // output beyond the normal PD limit.  It is feedback-triggered and decays

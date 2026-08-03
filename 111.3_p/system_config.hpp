@@ -93,10 +93,10 @@ struct AppConfig {
     double task3VelocityKdDegPerCmS = 0.040;
     // I is active only near either target.  It is reset whenever the target
     // changes and is capped by the two values below.
-    double task3IntegralKiDegPerCmSecond = 0.120;
-    double task3IntegralZoneCm = 0.80;
-    double task3IntegralSpeedLimitCmS = 1.2;
-    double task3IntegralLimitCmSeconds = 0.90;
+    double task3IntegralKiDegPerCmSecond = 0.300;
+    double task3IntegralZoneCm = 3.00;
+    double task3IntegralSpeedLimitCmS = 0.8;
+    double task3IntegralLimitCmSeconds = 0.60;
 
     // If a large position error remains while the measured ball speed stays
     // near zero, slowly add a bounded breakaway angle.  This compensates
