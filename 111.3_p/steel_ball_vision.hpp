@@ -1088,8 +1088,24 @@ class SteelBallDetector {
         lastHoughCandidates_ = static_cast<int>(circles.size());
 
         std::vector<Candidate> candidates;
-        // 霍夫结果通常已按票数排序。只精修前几个候选，避免宽松参数下
-        // 对十几个假圆逐个做两次SVD拟合拖垮120 FPS。
+        // HoughCircles按票数排序，但白管、螺丝和反光会产生几十个高票假圆。
+        // 在执行昂贵的圆拟合前，先把接近运动预测且靠近管轴的原始圆排到
+        // 前面。这样仍只精修少量候选，同时不会因钢球未进前几名而漏检。
+        const auto houghPriority = [&](const cv::Vec3f& circle) {
+            const cv::Point2f center(
+                circle[0] + search.x, circle[1] + search.y);
+            const float expectedDistance = static_cast<float>(
+                cv::norm(center - expected));
+            const float axisDistance = axisGateEnabled_ ?
+                distanceToAxis(center) : 0.0f;
+            return expectedDistance + 2.0f * axisDistance;
+        };
+        std::stable_sort(
+            circles.begin(), circles.end(),
+            [&](const cv::Vec3f& first, const cv::Vec3f& second) {
+                return houghPriority(first) < houghPriority(second);
+            });
+
         const std::size_t count = std::min(
             circles.size(), static_cast<std::size_t>(HOUGH_MAX_CANDIDATES));
         candidates.reserve(count);
@@ -1259,13 +1275,6 @@ public:
              candidate.radius < radius_ * 0.78f ||
              candidate.radius > radius_ * 1.28f)) {
             // 锁定后半径限制比原版更严格，防止突然切换到另一种尺寸的圆。
-            candidate = Candidate{};
-        }
-
-        if (locked_ && candidate.valid && candidate.houghOnly &&
-            misses_ < 2) {
-            // 暗斑短暂漏一两帧时先沿用预测位置，不立即切换到未经验证的霍夫圆。
-            // 连续两帧都没有暗斑后才允许霍夫备用，兼顾运动模糊时不断轨。
             candidate = Candidate{};
         }
 

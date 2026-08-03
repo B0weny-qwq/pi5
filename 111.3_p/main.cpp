@@ -15,12 +15,12 @@
 // 【通常不改】你的摄像头已实测640x480、MJPG、约120 FPS。
 #define BALL_CFG_CAMERA_WIDTH 640
 #define BALL_CFG_CAMERA_HEIGHT 480
-#define BALL_CFG_CAMERA_FPS 120
+#define BALL_CFG_CAMERA_FPS 25
 
 // Restore the visual parameters from the archived 111.3_pre snapshot.
 #define BALL_CFG_RADIUS_MIN 7.5f
-#define BALL_CFG_RADIUS_MAX 16.0f
-#define BALL_CFG_RADIUS_EXPECTED 11.0f
+#define BALL_CFG_RADIUS_MAX 18.0f
+#define BALL_CFG_RADIUS_EXPECTED 15.0f
 
 #define BALL_CFG_MIN_DETECTION_SCORE 0.34f
 
@@ -66,12 +66,12 @@
 
 // 不再为SSH预览帧率削减识别。每帧运行霍夫并精修全部合理候选；截图中已有
 // H=38但旧代码只检查前4个，这正是钢球存在却V=0的主要原因之一。
-#define BALL_CFG_HOUGH_INTERVAL 8
-#define BALL_CFG_HOUGH_MAX_CANDIDATES 4
+#define BALL_CFG_HOUGH_INTERVAL 2
+#define BALL_CFG_HOUGH_MAX_CANDIDATES 24
 
-// 第3题开始前球必须在O点。首次捕获只接受O点附近75像素内的候选，
-// 这样无球或刚启动时不会锁到水管右端固定螺丝。
-#define BALL_CFG_INITIAL_ACQUIRE_GATE_PX 55.0f
+// 窄ROI已经排除管外机构，因此首次捕获允许覆盖-5、0、+5三个位置。
+// 任务启动仍由centerReadyFrames单独要求钢球在O点连续稳定确认。
+#define BALL_CFG_INITIAL_ACQUIRE_GATE_PX 150.0f
 
 // ====================== A. 视觉参数修改区结束 ======================
 
@@ -99,16 +99,16 @@ ball_stepper::AppConfig makeUserConfig()
     // 固定安装后关闭自动对焦，避免识别过程中镜头反复改变清晰度和钢球外观。
     config.disableAutofocus = true;
 
-    // 固定较低曝光，避免自动曝光把白管画面拉得过亮并产生明暗波动。
-    // 45通常对应约4.5 ms，仍短于120 FPS的一帧周期。
+    // 当前Microdia摄像头在640x480下硬件上限为25 FPS。
+    // 固定手动曝光，避免自动曝光随画面内容变化导致识别阈值漂移。
     config.configureExposure = true;
     config.useManualExposure = true;
-    config.exposureAbsolute = 45.0;
+    config.exposureAbsolute = 15.0;
 
     // ---------------- 2. ROI和水管轴线 ----------------
-// 黄框和实际识别ROI都覆盖整段可见水管；最新三个位置为x=167、275、398。
-    // 两者使用同一个矩形，避免钢球明明还在黄色框内却已经离开算法搜索范围。
-    config.pipeDisplayArea = cv::Rect(10, 210, 535, 65);
+    // 只处理题目运动区附近的窄水管带。标定点为x=167、275、398，
+    // 左右各保留约40 px防止过冲；框外画面不进入霍夫圆和暗斑检测。
+    config.pipeDisplayArea = cv::Rect(125, 220, 315, 55);
     config.roi = config.pipeDisplayArea;
     config.drawPipeDetectionArea = true;
 
@@ -155,8 +155,8 @@ ball_stepper::AppConfig makeUserConfig()
     // ---------------- 4. 钢球 PDI 外环 ----------------
     // 直管左右机械条件接近，两侧使用完全相同的位置P增益。
     // 5 cm误差对应0.30 deg；接近目标后按误差线性减小。
-    config.task3MoveRightPositionKpDegPerCm = 0.060;
-    config.task3MoveLeftPositionKpDegPerCm = 0.060;
+    config.task3MoveRightPositionKpDegPerCm = 0.065;
+    config.task3MoveLeftPositionKpDegPerCm = 0.065;
 
     // D仍使用x[n]与x[n-2]的速度。日志显示0.055在高速过靶时制动力不足；
     // P保持柔和的0.060，D恢复0.030只增强速度阻尼，不增加静止起步推力。
@@ -165,7 +165,7 @@ ball_stepper::AppConfig makeUserConfig()
     // I在最终区域且球速较低时介入。日志确认0.25 deg顶满后仍无法克服
     // 当前直管静摩擦，因此恢复0.40 deg最大积分权限；误差过零仍立即清零。
     config.task3IntegralKiDegPerCmSecond = 0.400;
-    config.task3IntegralZoneCm = 3.0;
+    config.task3IntegralZoneCm = 10.0;
     config.task3IntegralSpeedLimitCmS = 1.0;
     config.task3IntegralLimitCmSeconds = 1.0;
 
@@ -327,7 +327,7 @@ ball_stepper::AppConfig makeUserConfig()
     config.videoStreamEnabled = true;
     config.videoStreamHost = "192.168.137.1";
     config.videoStreamPort = 5600;
-    config.videoStreamFps = 30;
+    config.videoStreamFps = 25;
     config.videoStreamBitrateKbps = 1000;
 
     // ========================================================================
