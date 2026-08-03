@@ -10,17 +10,23 @@
 #include "latest_frame_capture.hpp"
 #include "balance_control.hpp"
 #include "task4_balance_control.hpp"
+#include "vehicle_motion_feedforward.hpp"
 #include "preview_window.hpp"
 #include "terminal_key_input.hpp"
 #include "udp_video_streamer.hpp"
 #include "zdt_stepper_uart.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdarg>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 
@@ -55,28 +61,44 @@ inline bool validateTask4Config(const AppConfig& config)
         config.task4StartSpeedCmS < 0.0 ||
         config.task4StartConfirmFrames < 1 ||
         config.task4Kp < 0.0 || config.task4Kd < 0.0 ||
-        config.task4FineKp < 0.0 || config.task4FineKd < 0.0 ||
-        config.task4FineKp > config.task4Kp ||
-        config.task4FineKd > config.task4Kd ||
-        config.task4FineZoneCm <= config.task4DeadbandCm ||
-        config.task4FineSpeedCmS <= config.task4StopSpeedCmS ||
         config.task4Ki < 0.0 ||
         config.task4IntegralLimitDeg < 0.0 ||
-        config.task4IntegralEnableErrorCm <= 0.0 ||
+        config.task4IntegralZoneCm <= config.task4DeadbandCm ||
+        config.task4IntegralSpeedLimitCmS <=
+            config.task4StopSpeedCmS ||
         config.task4IntegralLeakSeconds <= 0.0 ||
         config.task4DeadbandCm < 0.0 ||
         config.task4StopSpeedCmS < 0.0 ||
-        config.task4MaximumAngleDeg <= 0.0 ||
-        config.task4MaximumAngleDeg > config.maximumPipeAngleDeg ||
+        config.task4DriveAngleLimitDeg <= 0.0 ||
+        config.task4BrakeAngleLimitDeg <
+            config.task4DriveAngleLimitDeg ||
+        config.task4BrakeAngleLimitDeg > config.maximumPipeAngleDeg ||
         std::abs(config.task4LevelTrimDeg) >
-            config.task4MaximumAngleDeg ||
+            config.task4DriveAngleLimitDeg ||
         config.task4AngleSlewDegS <= 0.0 ||
-        config.task4LossFailureMs < config.lostHoldMs) {
+        config.task4LossFailureMs < config.lostHoldMs ||
+        config.task4VehicleEncoderCruiseValue <= 0.0 ||
+        config.task4VehicleEncoderMaximumAbsValue <
+            config.task4VehicleEncoderCruiseValue ||
+        std::abs(config.task4VehicleEncoderDirectionSign) != 1.0 ||
+        config.task4VehicleSpeedFilterSeconds <= 0.0 ||
+        config.task4VehicleAccelerationFilterSeconds <= 0.0 ||
+        config.task4VehicleAccelerationDecaySeconds <= 0.0 ||
+        config.task4VehicleAccelerationDeadbandUnitsS < 0.0 ||
+        config.task4VehicleAccelerationLimitUnitsS <= 0.0 ||
+        config.task4VehicleFeedforwardDegPerUnitS < 0.0 ||
+        std::abs(config.task4VehicleAccelerationAngleSign) != 1.0 ||
+        config.task4VehicleFeedforwardLimitDeg < 0.0 ||
+        config.task4VehicleFeedforwardLimitDeg >
+            config.task4DriveAngleLimitDeg ||
+        config.task4VehicleInputTimeoutMs < 1 ||
+        config.task4VehicleSampleMaximumGapMs < 2) {
         std::fprintf(stderr, "invalid TASK 4 balance parameter in main.cpp\n");
         return false;
     }
 
     if (config.speedFilterSeconds < 0.005 ||
+        config.speedDifferenceFrames < 1 ||
         config.maximumPipeAngleDeg <= 0.0 ||
         config.crankRadiusMm <= 1.0 ||
         config.actuatorDistanceMm <= 10.0 ||
@@ -97,9 +119,10 @@ inline bool validateTask4Config(const AppConfig& config)
     }
 
     if (config.motorEnabled &&
-        (!config.zeroOnStart || config.serialPort.empty() ||
-         config.serialBaud <= 0 || config.motorRpm <= 0 ||
-          config.motorAcceleration < 1 || config.motorCommandHz <= 0)) {
+        ((!config.zeroOnStart && !config.absoluteEncoderHomeOnStart) ||
+         config.serialPort.empty() || config.serialBaud <= 0 ||
+         config.motorRpm <= 0 || config.motorSpeedSlopeRpmS < 1 ||
+         config.motorCommandHz <= 0)) {
         std::fprintf(stderr, "invalid ZDT/UART safety parameter\n");
         return false;
     }
@@ -130,9 +153,186 @@ inline std::string task4FourccText(double rawFourcc)
     return std::string(text);
 }
 
-inline int runTask4VelocityApp(const AppConfig& config)
+struct Task4LogPaths {
+    std::string textPath;
+    std::string csvPath;
+};
+
+inline Task4LogPaths makeTask4LogPaths(const AppConfig& config)
+{
+    namespace filesystem = std::filesystem;
+    std::error_code error;
+    const filesystem::path directory(config.runtimeLogDirectory);
+    filesystem::create_directories(directory, error);
+    if (error) return {};
+
+    std::string event;
+    for (const unsigned char character : config.runtimeLogEvent) {
+        event.push_back(std::isalnum(character) || character == '_' ||
+                        character == '-' ? static_cast<char>(character) : '_');
+    }
+    if (event.empty()) event = "task4_balance";
+
+    const auto now = std::chrono::system_clock::now();
+    const auto milliseconds = std::chrono::duration_cast<
+        std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+    const std::time_t calendarTime =
+        std::chrono::system_clock::to_time_t(now);
+    std::tm localTime{};
+#if defined(_WIN32)
+    if (localtime_s(&localTime, &calendarTime) != 0) return {};
+#else
+    if (localtime_r(&calendarTime, &localTime) == nullptr) return {};
+#endif
+
+    char timestamp[40];
+    std::snprintf(
+        timestamp, sizeof(timestamp), "%04d%02d%02d_%02d%02d%02d_%03lld",
+        localTime.tm_year + 1900, localTime.tm_mon + 1, localTime.tm_mday,
+        localTime.tm_hour, localTime.tm_min, localTime.tm_sec,
+        static_cast<long long>(milliseconds));
+    const std::string stem = event + "_" + timestamp;
+    return {
+        (directory / (stem + ".log")).string(),
+        (directory / (stem + ".csv")).string()
+    };
+}
+
+class Task4RuntimeLog {
+    bool enabled_ = false;
+    std::FILE* textFile_ = nullptr;
+    std::FILE* csvFile_ = nullptr;
+    std::string textPath_;
+    std::string csvPath_;
+    double startTime_ = secondsNow();
+
+public:
+    explicit Task4RuntimeLog(const AppConfig& config)
+        : enabled_(config.runtimeLogEnabled)
+    {
+        if (!enabled_) return;
+        const Task4LogPaths paths = makeTask4LogPaths(config);
+        textPath_ = paths.textPath;
+        csvPath_ = paths.csvPath;
+        if (!textPath_.empty()) textFile_ = std::fopen(textPath_.c_str(), "w");
+        if (!csvPath_.empty()) csvFile_ = std::fopen(csvPath_.c_str(), "w");
+        if (!textFile_ || !csvFile_) {
+            std::fprintf(stderr, "WARNING: cannot create TASK4 runtime logs\n");
+        }
+        if (csvFile_) {
+            std::fputs(
+                "elapsed_s,armed,finished,measured,locked,confidence,pixel_x,"
+                "pixel_y,position_cm,error_cm,speed_cm_s,two_frame_speed_cm_s,"
+                "vehicle_speed_raw_units,vehicle_speed_filtered_units,"
+                "vehicle_accel_raw_units_s,vehicle_accel_filtered_units_s,"
+                "vehicle_sample_age_ms,"
+                "vehicle_signal_fresh,ff_deg,p_deg,d_deg,i_deg,drive_deg,"
+                "request_deg,applied_deg,"
+                "motor_target_steps,motor_actual_steps,motor_target_rpm,"
+                "motor_actual_rpm,motor_command_rpm,motor_wire_rpm,"
+                "motor_acceleration_rpm_s,max_abs_error_cm,longest_lost_ms\n",
+                csvFile_);
+            std::fflush(csvFile_);
+        }
+    }
+
+    ~Task4RuntimeLog()
+    {
+        if (textFile_) std::fclose(textFile_);
+        if (csvFile_) std::fclose(csvFile_);
+    }
+
+    const std::string& textPath() const { return textPath_; }
+    const std::string& csvPath() const { return csvPath_; }
+
+    void write(const char* format, ...)
+    {
+        if (!enabled_) return;
+        char message[900];
+        va_list arguments;
+        va_start(arguments, format);
+        std::vsnprintf(message, sizeof(message), format, arguments);
+        va_end(arguments);
+
+        char line[1024];
+        std::snprintf(line, sizeof(line), "[diag +%.3fs] %s\n",
+                      secondsNow() - startTime_, message);
+        std::fputs(line, stderr);
+        std::fflush(stderr);
+        if (textFile_) {
+            std::fputs(line, textFile_);
+            std::fflush(textFile_);
+        }
+    }
+
+    void writeSample(bool armed,
+                     bool finished,
+                     const Result& result,
+                     double positionCm,
+                     double errorCm,
+                     double speedCmS,
+                     double rawTwoFrameSpeedCmS,
+                     const VehicleMotionState& vehicle,
+                     const Task4ControlOutput& control,
+                     double requestedAngleDeg,
+                     double appliedAngleDeg,
+                     int motorTargetSteps,
+                     const MotorLoopTelemetry& motor,
+                     double maximumAbsErrorCm,
+                     double longestLostMs)
+    {
+        if (!enabled_ || !csvFile_) return;
+        const double pixelX = result.measured ? result.center.x : -1.0;
+        const double pixelY = result.measured ? result.center.y : -1.0;
+        std::fprintf(
+            csvFile_,
+            "%.6f,%d,%d,%d,%d,%.5f,%.3f,%.3f,%.5f,%+.5f,%+.5f,%+.5f,"
+            "%+.6f,%+.6f,%+.6f,%+.6f,%.2f,%d,%+.6f,%+.6f,%+.6f,"
+            "%+.6f,%+.6f,%+.6f,%+.6f,%d,%+.3f,%+.3f,"
+            "%+.3f,%+.3f,%+.3f,%+.3f,%.5f,%.1f\n",
+            secondsNow() - startTime_, armed ? 1 : 0, finished ? 1 : 0,
+            result.measured ? 1 : 0, result.locked ? 1 : 0,
+            result.confidence, pixelX, pixelY, positionCm, errorCm,
+            speedCmS, rawTwoFrameSpeedCmS, vehicle.rawSpeedUnits,
+            vehicle.filteredSpeedUnits, vehicle.rawAccelerationUnitsS,
+            vehicle.filteredAccelerationUnitsS, vehicle.sampleAgeMs,
+            vehicle.signalFresh ? 1 : 0, control.feedforwardTermDeg,
+            control.pTermDeg,
+            control.dTermDeg, control.iTermDeg, control.driveAngleDeg,
+            requestedAngleDeg, appliedAngleDeg, motorTargetSteps,
+            motor.actualSteps, motor.targetSpeedRpm, motor.actualSpeedRpm,
+            motor.commandSpeedRpm, motor.wireCommandSpeedRpm,
+            motor.commandAccelerationRpmS, maximumAbsErrorCm, longestLostMs);
+        std::fflush(csvFile_);
+    }
+};
+
+inline int runTask4VelocityApp(
+    const AppConfig& config,
+    VehicleEncoderSource* vehicleEncoderSource = nullptr)
 {
     if (!validateConfig(config) || !validateTask4Config(config)) return 1;
+
+    Task4RuntimeLog diagnostics(config);
+    diagnostics.write("RUN_LOG text=%s csv=%s",
+        diagnostics.textPath().empty() ? "<unavailable>" :
+            diagnostics.textPath().c_str(),
+        diagnostics.csvPath().empty() ? "<unavailable>" :
+            diagnostics.csvPath().c_str());
+    diagnostics.write(
+        "START motor=%d ppr=%d command_hz=%d max_rpm=%d slope=%d "
+        "P=%.3f D=%.3f I=%.3f drive=%.3f brake=%.3f "
+        "encoder_source=%d ff_gain=%.6fdeg/(unit/s) "
+        "ff_limit=%.3f sign=%+.0f cruise=%.1f",
+        config.motorEnabled ? 1 : 0, config.pulsesPerRevolution,
+        config.motorCommandHz, config.motorRpm, config.motorSpeedSlopeRpmS,
+        config.task4Kp, config.task4Kd, config.task4Ki,
+        config.task4DriveAngleLimitDeg, config.task4BrakeAngleLimitDeg,
+        vehicleEncoderSource ? 1 : 0,
+        config.task4VehicleFeedforwardDegPerUnitS,
+        config.task4VehicleFeedforwardLimitDeg,
+        config.task4VehicleAccelerationAngleSign,
+        config.task4VehicleEncoderCruiseValue);
     if (config.cameraWidth != CAMERA_WIDTH ||
         config.cameraHeight != CAMERA_HEIGHT ||
         config.cameraFps != CAMERA_FPS) {
@@ -149,7 +349,9 @@ inline int runTask4VelocityApp(const AppConfig& config)
     }
 
     camera.set(cv::CAP_PROP_FOURCC,
-               cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+        cv::VideoWriter::fourcc(
+            config.cameraFourcc[0], config.cameraFourcc[1],
+            config.cameraFourcc[2], config.cameraFourcc[3]));
     camera.set(cv::CAP_PROP_FRAME_WIDTH, config.cameraWidth);
     camera.set(cv::CAP_PROP_FRAME_HEIGHT, config.cameraHeight);
     camera.set(cv::CAP_PROP_FPS, config.cameraFps);
@@ -160,9 +362,10 @@ inline int runTask4VelocityApp(const AppConfig& config)
         const bool modeSet = camera.set(cv::CAP_PROP_AUTO_EXPOSURE, 1.0);
         const bool exposureSet = camera.set(
             cv::CAP_PROP_EXPOSURE, config.exposureAbsolute);
+        const double actualExposure = camera.get(cv::CAP_PROP_EXPOSURE);
         std::fprintf(stderr,
-            "camera exposure: manual %.1f%s\n",
-            config.exposureAbsolute,
+            "camera exposure: manual requested=%.1f actual=%.1f%s\n",
+            config.exposureAbsolute, actualExposure,
             modeSet && exposureSet ? "" : " (driver rejected setting)");
     } else if (config.configureExposure) {
         const bool autoExposureSet =
@@ -179,6 +382,13 @@ inline int runTask4VelocityApp(const AppConfig& config)
         camera.get(cv::CAP_PROP_FRAME_HEIGHT),
         task4FourccText(camera.get(cv::CAP_PROP_FOURCC)).c_str(),
         camera.get(cv::CAP_PROP_FPS));
+    diagnostics.write(
+        "CAMERA actual=%.0fx%.0f fourcc=%s fps=%.2f exposure=%.1f",
+        camera.get(cv::CAP_PROP_FRAME_WIDTH),
+        camera.get(cv::CAP_PROP_FRAME_HEIGHT),
+        task4FourccText(camera.get(cv::CAP_PROP_FOURCC)).c_str(),
+        camera.get(cv::CAP_PROP_FPS),
+        camera.get(cv::CAP_PROP_EXPOSURE));
 
     cv::Mat frame;
     if (!camera.read(frame) || !task4FrameMatchesConfig(frame, config)) {
@@ -227,20 +437,83 @@ inline int runTask4VelocityApp(const AppConfig& config)
     if (config.motorEnabled) {
         if (!serial.openPort(config.serialPort, config.serialBaud)) return 1;
         motor = std::make_unique<EmmV5Motor>(serial, config);
+
+        ZdtDriverParameters driverParameters;
+        if (!motor->readDriverParameters(driverParameters) ||
+            !motor->configureDriverParameters(driverParameters)) {
+            std::fprintf(stderr,
+                "ZDT driver parameter query failed before startup\n");
+            diagnostics.write("ERROR ZDT driver parameter query failed");
+            return 1;
+        }
+        const bool immediateCommandAck =
+            zdtResponseModeHasImmediateAck(driverParameters.responseMode);
+        motor->setExpectCommandAck(immediateCommandAck);
+        diagnostics.write(
+            "ZDT_CONFIG motor_type=%u mstep=%u response=%u ack=%d "
+            "command_ppr=%u",
+            static_cast<unsigned>(driverParameters.motorType),
+            static_cast<unsigned>(driverParameters.microstep),
+            static_cast<unsigned>(driverParameters.responseMode),
+            immediateCommandAck ? 1 : 0,
+            static_cast<unsigned>(
+                motor->positionCommandPulsesPerRevolution()));
+
         if (!motor->enable()) {
             std::fprintf(stderr, "ZDT enable command failed\n");
+            diagnostics.write("ERROR ZDT enable command failed");
             return 1;
         }
         std::this_thread::sleep_for(
             std::chrono::milliseconds(config.enableSettleMs));
         if (!motor->stop()) {
             std::fprintf(stderr, "ZDT startup stop command failed\n");
+            diagnostics.write("ERROR ZDT startup stop command failed");
             return 1;
         }
         std::this_thread::sleep_for(
             std::chrono::milliseconds(config.stopSettleMs));
+
+        if (config.absoluteEncoderHomeOnStart) {
+            ZdtHomingParameters homingParameters;
+            if (!motor->readHomingParameters(homingParameters)) {
+                std::fprintf(stderr,
+                    "ZDT absolute homing parameters could not be read\n");
+                diagnostics.write("ERROR cannot read absolute home config");
+                motor->stop();
+                return 1;
+            }
+            if (homingParameters.mode != ZdtHomingMode::Nearest ||
+                homingParameters.velocityRpm !=
+                    static_cast<uint16_t>(config.absoluteEncoderHomeRpm) ||
+                homingParameters.powerOnAutomatic) {
+                std::fprintf(stderr,
+                    "ZDT absolute origin is unsafe; run "
+                    "./motor_cli origin-set at LEVEL\n");
+                diagnostics.write("ERROR unsafe absolute home configuration");
+                motor->stop();
+                return 1;
+            }
+
+            std::fprintf(stderr,
+                "returning to stored absolute encoder zero at %d RPM...\n",
+                config.absoluteEncoderHomeRpm);
+            diagnostics.write("EVENT absolute encoder homing started");
+            if (!motor->homeToStoredSingleTurnOrigin(
+                    config.absoluteEncoderHomeTimeoutMs,
+                    config.absoluteEncoderHomePollMs)) {
+                std::fprintf(stderr,
+                    "ZDT absolute encoder homing failed; control refused\n");
+                diagnostics.write("ERROR absolute encoder homing failed");
+                motor->stop();
+                return 1;
+            }
+            diagnostics.write("EVENT absolute encoder homing completed");
+        }
+
         if (!motor->clearPosition()) {
             std::fprintf(stderr, "ZDT clear-position command failed\n");
+            diagnostics.write("ERROR ZDT clear-position command failed");
             motor->stop();
             return 1;
         }
@@ -249,19 +522,21 @@ inline int runTask4VelocityApp(const AppConfig& config)
         commander = std::make_unique<MotorCommander>(*motor, config);
         if (!commander->force(0)) {
             std::fprintf(stderr,
-                "ZDT speed-mode initialization failed; "
-                "check Response=Receive/Both\n");
+                "ZDT speed-mode initialization failed; check UART settings\n");
+            diagnostics.write("ERROR initial 0 RPM cycle failed");
             motor->stop();
             return 1;
         }
         std::fprintf(stderr,
             "ZDT velocity mode ready: %s %d baud, address=%d; "
-            "0x36 position + 0x35 speed + 0xF6 command\n",
+            "stored LEVEL is zero\n",
             config.serialPort.c_str(), config.serialBaud,
             config.motorAddress);
+        diagnostics.write("ZDT_READY stored absolute LEVEL is logical zero");
     } else {
         std::fprintf(stderr,
             "DRY-RUN: motor disabled; commands are display only\n");
+        diagnostics.write("DRY_RUN motor disabled");
     }
 
     if (capture.waitForNext(
@@ -288,8 +563,10 @@ inline int runTask4VelocityApp(const AppConfig& config)
         config.centerCalibrationPoint,
         config.useThreePointPositionCalibration);
     const PipeAxis pipeAxis(config);
-    BallStateEstimator estimator(config.speedFilterSeconds);
+    BallStateEstimator estimator(
+        config.speedFilterSeconds, config.speedDifferenceFrames);
     Task4BalanceController controller(config);
+    VehicleMotionFeedforward vehicleFeedforward(config);
     const MechanismModel mechanism(config);
     PreviewWindow preview("ball2-task4-velocity");
     if (config.gui) preview.start();
@@ -297,6 +574,7 @@ inline int runTask4VelocityApp(const AppConfig& config)
     if (config.csv) {
         std::printf(
             "frame,time,measured,position_cm,error_cm,speed_cm_s,"
+            "vehicle_speed_units,vehicle_accel_units_s,ff_deg,"
             "p_deg,d_deg,i_deg,request_deg,applied_deg,motor_steps,"
             "motor_pos,motor_rpm,target_rpm,command_rpm,command_acc\n");
     }
@@ -305,6 +583,8 @@ inline int runTask4VelocityApp(const AppConfig& config)
     bool armed = config.startArmed;
     bool hadMeasurement = false;
     bool measuredNow = false;
+    bool startPositionReady = false;
+    bool startSpeedReady = false;
     bool evaluationFinished = false;
     bool evaluationPassed = false;
     bool lossFailure = false;
@@ -316,14 +596,17 @@ inline int runTask4VelocityApp(const AppConfig& config)
     double positionCm = config.task4TargetCm;
     double errorCm = 0.0;
     double speedCmS = 0.0;
+    double rawTwoFrameSpeedCmS = 0.0;
     double requestedAngleDeg = 0.0;
     double appliedAngleDeg = 0.0;
-    double lastMeasuredAngleDeg = 0.0;
+    double lastMeasuredFeedbackAngleDeg = 0.0;
     double maximumAbsErrorCm = 0.0;
     double longestLostMs = 0.0;
     int motorSteps = 0;
     MotorLoopTelemetry motorTelemetry;
     Task4ControlOutput controlOutput;
+    VehicleMotionState vehicleMotion;
+    vehicleFeedforward.reset(initialControlTime);
 
     if (armed) {
         controller.reset(initialControlTime);
@@ -332,6 +615,8 @@ inline int runTask4VelocityApp(const AppConfig& config)
 
     uint64_t sequence = 0;
     double nextVideoStreamTime = secondsNow();
+    double nextRuntimeLogTime = secondsNow();
+    double nextPausedStatusTime = secondsNow();
     bool videoStreamFailureReported = false;
     int controlFrames = 0;
     double controlFps = 0.0;
@@ -355,6 +640,15 @@ inline int runTask4VelocityApp(const AppConfig& config)
             now - previousLoopTime, 0.002, 0.05);
         previousLoopTime = now;
 
+        if (vehicleEncoderSource) {
+            VehicleEncoderSample sample;
+            for (int sampleCount = 0; sampleCount < 32; ++sampleCount) {
+                if (!vehicleEncoderSource->poll(sample)) break;
+                vehicleFeedforward.submitEncoderSample(sample);
+            }
+        }
+        vehicleMotion = vehicleFeedforward.update(now);
+
         const Result result = detector.update(frame);
         measuredNow = result.measured;
 
@@ -362,13 +656,17 @@ inline int runTask4VelocityApp(const AppConfig& config)
             positionCm = pipeAxis.toCentimeters(result.center);
             estimator.update(positionCm, now);
             speedCmS = estimator.speedCmS();
+            rawTwoFrameSpeedCmS = estimator.rawTwoFrameSpeedCmS();
             errorCm = positionCm - config.task4TargetCm;
             lastMeasurementTime = now;
             hadMeasurement = true;
+            startPositionReady =
+                std::abs(errorCm) <= config.task4StartToleranceCm;
+            startSpeedReady =
+                std::abs(speedCmS) <= config.task4StartSpeedCmS;
 
             if (!armed) {
-                if (std::abs(errorCm) <= config.task4StartToleranceCm &&
-                    std::abs(speedCmS) <= config.task4StartSpeedCmS) {
+                if (startPositionReady && startSpeedReady) {
                     ++readyFrames;
                 } else {
                     readyFrames = 0;
@@ -376,9 +674,12 @@ inline int runTask4VelocityApp(const AppConfig& config)
                 requestedAngleDeg = 0.0;
                 controlOutput = {};
             } else {
-                controlOutput = controller.update(errorCm, speedCmS, now);
+                controlOutput = controller.update(
+                    errorCm, speedCmS,
+                    vehicleMotion.feedforwardAngleDeg, now);
                 requestedAngleDeg = controlOutput.angleDeg;
-                lastMeasuredAngleDeg = requestedAngleDeg;
+                lastMeasuredFeedbackAngleDeg =
+                    requestedAngleDeg - controlOutput.feedforwardTermDeg;
 
                 if (!evaluationFinished) {
                     maximumAbsErrorCm = std::max(
@@ -386,7 +687,11 @@ inline int runTask4VelocityApp(const AppConfig& config)
                 }
             }
         } else {
+            controlOutput.feedforwardTermDeg =
+                vehicleMotion.feedforwardAngleDeg;
             readyFrames = 0;
+            startPositionReady = false;
+            startSpeedReady = false;
             controller.onMeasurementLost();
 
             if (armed && hadMeasurement && lastMeasurementTime >= 0.0) {
@@ -400,17 +705,27 @@ inline int runTask4VelocityApp(const AppConfig& config)
                 }
 
                 if (lostMs <= config.lostHoldMs) {
-                    requestedAngleDeg = lastMeasuredAngleDeg;
+                    requestedAngleDeg = std::clamp(
+                        vehicleMotion.feedforwardAngleDeg +
+                            lastMeasuredFeedbackAngleDeg,
+                        -config.task4BrakeAngleLimitDeg,
+                         config.task4BrakeAngleLimitDeg);
                 } else if (lostMs < config.lostNeutralMs) {
                     const double ratio =
                         (lostMs - config.lostHoldMs) /
                         std::max(1, config.lostNeutralMs -
                                        config.lostHoldMs);
-                    requestedAngleDeg =
-                        lastMeasuredAngleDeg * (1.0 - ratio);
+                    requestedAngleDeg = std::clamp(
+                        vehicleMotion.feedforwardAngleDeg +
+                            lastMeasuredFeedbackAngleDeg * (1.0 - ratio),
+                        -config.task4BrakeAngleLimitDeg,
+                         config.task4BrakeAngleLimitDeg);
                 } else {
-                    requestedAngleDeg = 0.0;
+                    requestedAngleDeg =
+                        vehicleMotion.feedforwardAngleDeg;
                     speedCmS = 0.0;
+                    rawTwoFrameSpeedCmS = 0.0;
+                    estimator.onMeasurementLost();
                 }
             } else {
                 requestedAngleDeg = 0.0;
@@ -447,15 +762,60 @@ inline int runTask4VelocityApp(const AppConfig& config)
                 "longest_lost=%.0f ms\n",
                 evaluationPassed ? "PASS" : "FAIL",
                 maximumAbsErrorCm, longestLostMs);
+            diagnostics.write(
+                "RESULT %s elapsed=%.3f max_error_cm=%.3f longest_lost_ms=%.0f",
+                evaluationPassed ? "PASS" : "FAIL",
+                finishTime - runStartTime, maximumAbsErrorCm, longestLostMs);
+        }
+
+        if (now >= nextRuntimeLogTime) {
+            diagnostics.writeSample(
+                armed, evaluationFinished, result, positionCm, errorCm,
+                speedCmS, rawTwoFrameSpeedCmS, vehicleMotion, controlOutput,
+                requestedAngleDeg, appliedAngleDeg, motorSteps,
+                motorTelemetry, maximumAbsErrorCm, longestLostMs);
+            nextRuntimeLogTime = now +
+                config.runtimeLogIntervalMs / 1000.0;
+        }
+
+        if (!armed && now >= nextPausedStatusTime) {
+            const char* reason = !measuredNow ? "BALL_NOT_FOUND" :
+                !startPositionReady ? "OUTSIDE_START_WINDOW" :
+                !startSpeedReady ? "BALL_MOVING" :
+                readyFrames < config.task4StartConfirmFrames ?
+                    "CONFIRMING" : "READY_PRESS_SPACE";
+            diagnostics.write(
+                "WAIT reason=%s measured=%d error=%+.3fcm allowed=+/-%.3fcm "
+                "speed=%+.3fcm/s speed_limit=%.3f ready=%d/%d "
+                "encoder_source=%d encoder_fresh=%d car_v=%+.2funit "
+                "car_a=%+.1funit/s ff=%+.3fdeg "
+                "video_sent=%llu video_failed=%d",
+                reason, measuredNow ? 1 : 0, errorCm,
+                config.task4StartToleranceCm, speedCmS,
+                config.task4StartSpeedCmS, readyFrames,
+                config.task4StartConfirmFrames,
+                vehicleEncoderSource ? 1 : 0,
+                vehicleMotion.signalFresh ? 1 : 0,
+                vehicleMotion.filteredSpeedUnits,
+                vehicleMotion.filteredAccelerationUnitsS,
+                vehicleMotion.feedforwardAngleDeg,
+                static_cast<unsigned long long>(
+                    videoStreamer ? videoStreamer->sentFrames() : 0),
+                videoStreamer && videoStreamer->failed() ? 1 : 0);
+            nextPausedStatusTime = now + 1.0;
         }
 
         if (config.csv) {
             std::printf(
                 "%llu,%.6f,%d,%.4f,%+.4f,%+.4f,%+.5f,%+.5f,%+.5f,"
-                "%+.5f,%+.5f,%d,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                "%+.5f,%+.5f,%+.5f,%+.5f,%+.5f,%d,%.3f,%.3f,"
+                "%.3f,%.3f,%.3f\n",
                 static_cast<unsigned long long>(sequence), now,
                 result.measured ? 1 : 0,
                 positionCm, errorCm, speedCmS,
+                vehicleMotion.filteredSpeedUnits,
+                vehicleMotion.filteredAccelerationUnitsS,
+                controlOutput.feedforwardTermDeg,
                 controlOutput.pTermDeg,
                 controlOutput.dTermDeg,
                 controlOutput.iTermDeg,
@@ -513,7 +873,7 @@ inline int runTask4VelocityApp(const AppConfig& config)
 
             if (result.measured) {
                 drawBall(displayFrame, result.center, result.radius,
-                         result.confidence, cv::Scalar(0, 255, 0));
+                         cv::Scalar(0, 255, 0));
             } else {
                 char visionText[160];
                 std::snprintf(visionText, sizeof(visionText),
@@ -548,17 +908,31 @@ inline int runTask4VelocityApp(const AppConfig& config)
             const double elapsed = armed ?
                 ((evaluationFinished ? finishTime : now) - runStartTime) : 0.0;
             char line[220];
-            std::snprintf(line, sizeof(line),
-                "TASK4 %s time=%.2fs ready=%d/%d",
-                armed ? (evaluationFinished ?
-                    (evaluationPassed ? "PASS/HOLD" : "FAIL/HOLD") :
-                    "BALANCE") : "PAUSED",
-                elapsed, readyFrames, config.task4StartConfirmFrames);
+            if (!armed) {
+                const char* waitText = !measuredNow ? "WAIT BALL" :
+                    !startPositionReady ? "MOVE BALL INTO +/-1CM" :
+                    !startSpeedReady ? "WAIT BALL STOP" :
+                    readyFrames < config.task4StartConfirmFrames ?
+                        "CONFIRMING" : "READY - PRESS SPACE";
+                std::snprintf(line, sizeof(line),
+                    "TASK4 %s ready=%d/%d",
+                    waitText, readyFrames, config.task4StartConfirmFrames);
+            } else {
+                std::snprintf(line, sizeof(line),
+                    "TASK4 %s time=%.2fs",
+                    evaluationFinished ?
+                        (evaluationPassed ? "PASS/HOLD" : "FAIL/HOLD") :
+                        "BALANCE",
+                    elapsed);
+            }
             cv::putText(displayFrame, line, {10, 52},
                         cv::FONT_HERSHEY_SIMPLEX, 0.50,
-                        armed ? cv::Scalar(0, 255, 255)
-                              : cv::Scalar(0, 165, 255),
-                        1, cv::LINE_AA);
+                        !armed && readyFrames >=
+                            config.task4StartConfirmFrames ?
+                                cv::Scalar(0, 255, 0) :
+                                (armed ? cv::Scalar(0, 255, 255)
+                                       : cv::Scalar(0, 165, 255)),
+                        2, cv::LINE_AA);
 
             std::snprintf(line, sizeof(line),
                 "pos=%.3f err=%+.3fcm v=%+.2fcm/s max=%.3fcm",
@@ -571,8 +945,9 @@ inline int runTask4VelocityApp(const AppConfig& config)
                         1, cv::LINE_AA);
 
             std::snprintf(line, sizeof(line),
-                "%s P=%+.3f D=%+.3f I=%+.3f req=%+.3f pipe=%+.3f",
-                controlOutput.fineMode ? "FINE" : "RECOVER",
+                "%s FF=%+.3f P=%+.3f D=%+.3f I=%+.3f req=%+.3f pipe=%+.3f",
+                controlOutput.integralWindowActive ? "PDI" : "PD",
+                controlOutput.feedforwardTermDeg,
                 controlOutput.pTermDeg,
                 controlOutput.dTermDeg,
                 controlOutput.iTermDeg,
@@ -582,13 +957,27 @@ inline int runTask4VelocityApp(const AppConfig& config)
                         {0, 255, 255}, 1, cv::LINE_AA);
 
             std::snprintf(line, sizeof(line),
+                "CAR src=%d fresh=%d v=%+.1f a=%+.1funit/s age=%.0fms",
+                vehicleEncoderSource ? 1 : 0,
+                vehicleMotion.signalFresh ? 1 : 0,
+                vehicleMotion.filteredSpeedUnits,
+                vehicleMotion.filteredAccelerationUnitsS,
+                vehicleMotion.sampleAgeMs);
+            cv::putText(displayFrame, line, {10, 124},
+                        cv::FONT_HERSHEY_SIMPLEX, 0.43,
+                        vehicleMotion.signalFresh ?
+                            cv::Scalar(0, 255, 0) :
+                            cv::Scalar(0, 165, 255),
+                        1, cv::LINE_AA);
+
+            std::snprintf(line, sizeof(line),
                 "M tgt=%+d pos=%+.1f rpm=%+.1f cmd=%+.1f acc=%+.1f",
                 motorSteps,
                 motorTelemetry.actualSteps,
                 motorTelemetry.actualSpeedRpm,
                 motorTelemetry.commandSpeedRpm,
                 motorTelemetry.commandAccelerationRpmS);
-            cv::putText(displayFrame, line, {10, 124},
+            cv::putText(displayFrame, line, {10, 148},
                         cv::FONT_HERSHEY_SIMPLEX, 0.43,
                         {220, 220, 220}, 1, cv::LINE_AA);
 
@@ -601,7 +990,7 @@ inline int runTask4VelocityApp(const AppConfig& config)
                 visionSource,
                 controlFps,
                 capture.measuredFps());
-            cv::putText(displayFrame, sourceText, {10, 148},
+            cv::putText(displayFrame, sourceText, {10, 172},
                         cv::FONT_HERSHEY_SIMPLEX, 0.43,
                         result.measured ? cv::Scalar(0, 255, 0)
                                         : cv::Scalar(0, 165, 255),
@@ -632,8 +1021,13 @@ inline int runTask4VelocityApp(const AppConfig& config)
             } else if (!measuredNow ||
                        readyFrames < config.task4StartConfirmFrames) {
                 std::fprintf(stderr,
-                    "TASK4 start refused: wait for green ball at O and "
-                    "ready counter\n");
+                    "TASK4 start refused: measured=%d error=%+.3fcm "
+                    "allowed=+/-%.3fcm speed=%+.3fcm/s limit=%.3f "
+                    "ready=%d/%d\n",
+                    measuredNow ? 1 : 0, errorCm,
+                    config.task4StartToleranceCm, speedCmS,
+                    config.task4StartSpeedCmS, readyFrames,
+                    config.task4StartConfirmFrames);
             } else {
                 armed = true;
                 evaluationFinished = false;
@@ -646,7 +1040,7 @@ inline int runTask4VelocityApp(const AppConfig& config)
                 controller.reset(now);
                 estimator.reset();
                 lastMeasurementTime = now;
-                lastMeasuredAngleDeg = 0.0;
+                lastMeasuredFeedbackAngleDeg = 0.0;
                 std::fprintf(stderr,
                     "TASK4 BALANCE started; start the car now\n");
             }

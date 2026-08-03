@@ -33,6 +33,7 @@ struct AppConfig {
     int cameraWidth = 640;
     int cameraHeight = 480;
     int cameraFps = 120;
+    std::string cameraFourcc = "MJPG";
     bool disableAutofocus = true;
 
     // false表示完全不改摄像头当前曝光设置。某些120 FPS UVC摄像头一旦被
@@ -71,26 +72,41 @@ struct AppConfig {
     double task4StartSpeedCmS = 1.0;
     int task4StartConfirmFrames = 6;
 
-    // 钢球外环PI-D。正倾角抬高水管右端，使钢球向左加速。
-    double task4Kp = 0.30;
-    double task4Kd = 0.12;
-    double task4FineKp = 0.15;
-    double task4FineKd = 0.055;
-    double task4FineZoneCm = 0.30;
-    double task4FineSpeedCmS = 1.8;
-    double task4Ki = 0.018;
+    // 对称PDI外环。P/I负责把球推回O点，D使用两帧速度提前制动。
+    double task4Kp = 0.11;
+    double task4Kd = 0.08;
+    double task4Ki = 0.15;
+    double task4IntegralZoneCm = 1.0;
+    double task4IntegralSpeedLimitCmS = 1.0;
     double task4IntegralLimitDeg = 0.12;
-    double task4IntegralEnableErrorCm = 1.5;
-    double task4IntegralLeakSeconds = 6.0;
+    double task4IntegralLeakSeconds = 4.0;
     double task4LevelTrimDeg = 0.0;
-    double task4DeadbandCm = 0.05;
-    double task4StopSpeedCmS = 0.35;
-    double task4MaximumAngleDeg = 0.60;
-    double task4AngleSlewDegS = 3.0;
+    double task4DeadbandCm = 0.02;
+    double task4StopSpeedCmS = 0.15;
+    double task4DriveAngleLimitDeg = 0.55;
+    double task4BrakeAngleLimitDeg = 0.65;
+    double task4AngleSlewDegS = 8.0;
     int task4LossFailureMs = 180;
 
+    // The chassis encoder is cleared every 50 ms. Each 20 Hz sample is already
+    // a signed speed quantity; normal cruise is about 80 raw units.
+    double task4VehicleEncoderCruiseValue = 80.0;
+    double task4VehicleEncoderMaximumAbsValue = 150.0;
+    double task4VehicleEncoderDirectionSign = 1.0;
+    double task4VehicleSpeedFilterSeconds = 0.035;
+    double task4VehicleAccelerationFilterSeconds = 0.060;
+    double task4VehicleAccelerationDecaySeconds = 0.120;
+    double task4VehicleAccelerationDeadbandUnitsS = 15.0;
+    double task4VehicleAccelerationLimitUnitsS = 2000.0;
+    double task4VehicleFeedforwardDegPerUnitS = 0.00040;
+    double task4VehicleAccelerationAngleSign = -1.0;
+    double task4VehicleFeedforwardLimitDeg = 0.50;
+    int task4VehicleInputTimeoutMs = 140;
+    int task4VehicleSampleMaximumGapMs = 120;
+
     // 钢球测速滤波和机构总安全倾角。
-    double speedFilterSeconds = 0.055;
+    double speedFilterSeconds = 0.020;
+    int speedDifferenceFrames = 2;
     double maximumPipeAngleDeg = 1.0;
 
     // ---------------- 曲柄连杆与脉冲换算 ----------------
@@ -108,10 +124,9 @@ struct AppConfig {
     std::string serialPort = "/dev/serial0";
     int serialBaud = 115200;
     int motorAddress = 1;
-    // 速度模式下的最大转速和ZDT内部曲线加减速档位。加速度档位必须非0，
-    // 否则驱动器会跳过曲线加减速，推拉机构换向时冲击很大。
+    // Emm V5 0xF6物理加速度请求，单位RPM/s。
     int motorRpm = 8;
-    int motorAcceleration = 5;
+    int motorSpeedSlopeRpmS = 60;
     int motorCommandHz = 30;
 
     // 电机串级环：目标水管角度先换算为目标电机轴位，位置环输出目标RPM，
@@ -131,10 +146,16 @@ struct AppConfig {
     // 当前位置在启动时清零，所以软限位也是相对水平零位的正负脉冲范围。
     int motorSoftLimitSteps = 130;
     int motorReplyTimeoutMs = 15;
+    int motorMaximumConsecutiveFailures = 3;
     bool motorExpectCommandAck = true;
 
-    // true表示启动时把“当前电机位置”清为绝对0脉冲。
-    // 只有水管已经真实水平、机构没有顶限位时才允许设为true。
+    // 首选：回到已保存的单圈绝对编码器零点，再清运行时坐标。
+    bool absoluteEncoderHomeOnStart = false;
+    int absoluteEncoderHomeRpm = 6;
+    int absoluteEncoderHomeTimeoutMs = 5000;
+    int absoluteEncoderHomePollMs = 40;
+
+    // 旧路径：把任意启动位置声明为零点，不能与绝对归位同时开启。
     bool zeroOnStart = false;
 
     // ZDT启动/清零/退出时的等待时间。通常不改，电机很慢时可适当增加退出等待。
@@ -154,15 +175,19 @@ struct AppConfig {
     bool gui = true;
     bool terminalKeys = true;
     bool csv = false;
+    bool runtimeLogEnabled = true;
+    std::string runtimeLogDirectory = "logs";
+    std::string runtimeLogEvent = "task4_balance";
+    int runtimeLogIntervalMs = 100;
     int previewEveryNFrames = 2;
 
     // ---------------- E611网络图传 ----------------
     // 视觉仍按cameraFps处理；这里只对叠加后的显示画面限帧、编码并通过UDP发送。
     bool videoStreamEnabled = false;
-    std::string videoStreamHost = "192.168.50.1";
+    std::string videoStreamHost = "192.168.137.1";
     int videoStreamPort = 5600;
     int videoStreamFps = 30;
-    int videoStreamBitrateKbps = 4000;
+    int videoStreamBitrateKbps = 1000;
 };
 
 using ControlClock = std::chrono::steady_clock;
@@ -199,6 +224,7 @@ inline bool validateConfig(const AppConfig& config)
 {
     if (config.cameraWidth < 160 || config.cameraHeight < 120 ||
         config.cameraFps < 1 || config.cameraFps > 240 ||
+        config.cameraFourcc.size() != 4 ||
         !std::isfinite(config.exposureAbsolute) ||
         (config.configureExposure && config.useManualExposure &&
          config.exposureAbsolute <= 0.0)) {
@@ -270,19 +296,13 @@ inline bool validateConfig(const AppConfig& config)
         config.task4StartConfirmFrames < 1 ||
         !std::isfinite(config.task4Kp) || config.task4Kp < 0.0 ||
         !std::isfinite(config.task4Kd) || config.task4Kd < 0.0 ||
-        !std::isfinite(config.task4FineKp) || config.task4FineKp < 0.0 ||
-        !std::isfinite(config.task4FineKd) || config.task4FineKd < 0.0 ||
-        config.task4FineKp > config.task4Kp ||
-        config.task4FineKd > config.task4Kd ||
-        !std::isfinite(config.task4FineZoneCm) ||
-        config.task4FineZoneCm <= config.task4DeadbandCm ||
-        !std::isfinite(config.task4FineSpeedCmS) ||
-        config.task4FineSpeedCmS <= config.task4StopSpeedCmS ||
         !std::isfinite(config.task4Ki) || config.task4Ki < 0.0 ||
+        !std::isfinite(config.task4IntegralZoneCm) ||
+        config.task4IntegralZoneCm <= config.task4DeadbandCm ||
+        !std::isfinite(config.task4IntegralSpeedLimitCmS) ||
+        config.task4IntegralSpeedLimitCmS <= config.task4StopSpeedCmS ||
         !std::isfinite(config.task4IntegralLimitDeg) ||
         config.task4IntegralLimitDeg < 0.0 ||
-        !std::isfinite(config.task4IntegralEnableErrorCm) ||
-        config.task4IntegralEnableErrorCm <= 0.0 ||
         !std::isfinite(config.task4IntegralLeakSeconds) ||
         config.task4IntegralLeakSeconds <= 0.0 ||
         !std::isfinite(config.task4LevelTrimDeg) ||
@@ -290,16 +310,48 @@ inline bool validateConfig(const AppConfig& config)
         config.task4DeadbandCm < 0.0 ||
         !std::isfinite(config.task4StopSpeedCmS) ||
         config.task4StopSpeedCmS < 0.0 ||
-        !std::isfinite(config.task4MaximumAngleDeg) ||
-        config.task4MaximumAngleDeg <= 0.0 ||
+        !std::isfinite(config.task4DriveAngleLimitDeg) ||
+        config.task4DriveAngleLimitDeg <= 0.0 ||
+        !std::isfinite(config.task4BrakeAngleLimitDeg) ||
+        config.task4BrakeAngleLimitDeg < config.task4DriveAngleLimitDeg ||
         !std::isfinite(config.task4AngleSlewDegS) ||
         config.task4AngleSlewDegS <= 0.0 ||
         config.task4LossFailureMs < config.lostHoldMs ||
+        !std::isfinite(config.task4VehicleEncoderCruiseValue) ||
+        config.task4VehicleEncoderCruiseValue <= 0.0 ||
+        !std::isfinite(config.task4VehicleEncoderMaximumAbsValue) ||
+        config.task4VehicleEncoderMaximumAbsValue <
+            config.task4VehicleEncoderCruiseValue ||
+        !std::isfinite(config.task4VehicleEncoderDirectionSign) ||
+        std::abs(config.task4VehicleEncoderDirectionSign) != 1.0 ||
+        !std::isfinite(config.task4VehicleSpeedFilterSeconds) ||
+        config.task4VehicleSpeedFilterSeconds <= 0.0 ||
+        !std::isfinite(config.task4VehicleAccelerationFilterSeconds) ||
+        config.task4VehicleAccelerationFilterSeconds <= 0.0 ||
+        !std::isfinite(config.task4VehicleAccelerationDecaySeconds) ||
+        config.task4VehicleAccelerationDecaySeconds <= 0.0 ||
+        !std::isfinite(config.task4VehicleAccelerationDeadbandUnitsS) ||
+        config.task4VehicleAccelerationDeadbandUnitsS < 0.0 ||
+        !std::isfinite(config.task4VehicleAccelerationLimitUnitsS) ||
+        config.task4VehicleAccelerationLimitUnitsS <= 0.0 ||
+        !std::isfinite(config.task4VehicleFeedforwardDegPerUnitS) ||
+        config.task4VehicleFeedforwardDegPerUnitS < 0.0 ||
+        !std::isfinite(config.task4VehicleAccelerationAngleSign) ||
+        std::abs(config.task4VehicleAccelerationAngleSign) != 1.0 ||
+        !std::isfinite(config.task4VehicleFeedforwardLimitDeg) ||
+        config.task4VehicleFeedforwardLimitDeg < 0.0 ||
+        config.task4VehicleFeedforwardLimitDeg >
+            config.task4DriveAngleLimitDeg ||
+        config.task4VehicleInputTimeoutMs < 1 ||
+        config.task4VehicleSampleMaximumGapMs < 2 ||
         config.speedFilterSeconds < 0.005 ||
+        config.speedDifferenceFrames < 1 ||
+        config.speedDifferenceFrames > 8 ||
         config.maximumPipeAngleDeg <= 0.0 ||
         config.maximumPipeAngleDeg > 10.0 ||
-        config.task4MaximumAngleDeg > config.maximumPipeAngleDeg ||
-        std::abs(config.task4LevelTrimDeg) > config.task4MaximumAngleDeg) {
+        config.task4BrakeAngleLimitDeg > config.maximumPipeAngleDeg ||
+        std::abs(config.task4LevelTrimDeg) >
+            config.task4DriveAngleLimitDeg) {
         std::fprintf(stderr, "invalid TASK 4 control parameter in main.cpp\n");
         return false;
     }
@@ -335,7 +387,8 @@ inline bool validateConfig(const AppConfig& config)
     }
     if (config.motorAddress < 0 || config.motorAddress > 255 ||
         config.motorRpm < 1 || config.motorRpm > 3000 ||
-        config.motorAcceleration < 1 || config.motorAcceleration > 255 ||
+        config.motorSpeedSlopeRpmS < 1 ||
+        config.motorSpeedSlopeRpmS > 65535 ||
         config.motorCommandHz < 1 || config.motorCommandHz > 120 ||
         !std::isfinite(config.motorPositionKpRpmPerStep) ||
         config.motorPositionKpRpmPerStep <= 0.0 ||
@@ -358,19 +411,17 @@ inline bool validateConfig(const AppConfig& config)
         config.motorEncoderSpeedFilterSeconds > 0.5 ||
         config.motorSoftLimitSteps < 1 ||
         config.motorReplyTimeoutMs < 2 ||
-        config.motorReplyTimeoutMs > 100) {
+        config.motorReplyTimeoutMs > 100 ||
+        config.motorMaximumConsecutiveFailures < 1 ||
+        config.motorMaximumConsecutiveFailures > 20) {
         std::fprintf(stderr, "invalid ZDT motor parameter\n");
         return false;
     }
 
-    // 手册公式：每增加1 RPM需要(256-acc)*50 us。软件制动模型不能假设
-    // 比驱动器硬件曲线更大的加速度，否则会低估停车距离。
-    const double zdtHardwareAccelerationRpmS =
-        20000.0 / (256.0 - config.motorAcceleration);
     if (config.motorMaximumAccelerationRpmS >
-        zdtHardwareAccelerationRpmS) {
+        static_cast<double>(config.motorSpeedSlopeRpmS)) {
         std::fprintf(stderr,
-            "software motor acceleration exceeds ZDT acceleration slot\n");
+            "software acceleration exceeds ZDT 0xF6 speed slope\n");
         return false;
     }
 
@@ -378,15 +429,40 @@ inline bool validateConfig(const AppConfig& config)
         std::fprintf(stderr, "motor enabled but serialPort is empty\n");
         return false;
     }
-    if (config.motorEnabled && !config.zeroOnStart) {
+    if (config.absoluteEncoderHomeOnStart && config.zeroOnStart) {
         std::fprintf(stderr,
-            "motor mode requires zeroOnStart=true after the pipe is level\n");
+            "absolute homing and legacy zeroOnStart cannot both be enabled\n");
+        return false;
+    }
+    if (config.motorEnabled && !config.absoluteEncoderHomeOnStart &&
+        !config.zeroOnStart) {
+        std::fprintf(stderr,
+            "motor mode requires absolute homing or explicit legacy zeroing\n");
+        return false;
+    }
+    if (config.absoluteEncoderHomeOnStart &&
+        (config.absoluteEncoderHomeRpm < 1 ||
+         config.absoluteEncoderHomeRpm > config.motorRpm ||
+         config.absoluteEncoderHomeTimeoutMs < 200 ||
+         config.absoluteEncoderHomeTimeoutMs > 60000 ||
+         config.absoluteEncoderHomePollMs < 10 ||
+         config.absoluteEncoderHomePollMs > 500)) {
+        std::fprintf(stderr, "invalid absolute encoder homing parameter\n");
         return false;
     }
     if (!config.gui && !config.terminalKeys &&
         config.motorEnabled && !config.startArmed) {
         std::fprintf(stderr,
             "headless motor mode requires terminalKeys or startArmed=true\n");
+        return false;
+    }
+    if (config.runtimeLogEnabled && config.runtimeLogDirectory.empty()) {
+        std::fprintf(stderr, "runtime log directory is empty\n");
+        return false;
+    }
+    if (config.runtimeLogIntervalMs < 20 ||
+        config.runtimeLogIntervalMs > 5000) {
+        std::fprintf(stderr, "invalid runtime log interval\n");
         return false;
     }
 

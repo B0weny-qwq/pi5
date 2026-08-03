@@ -1,86 +1,73 @@
-# 第4问：速度模式滚球平衡
+# 第4问：运行中保持O点
 
-本目录由当前 `111.3_p` 的视觉、ZDT速度模式、异步采集、终端控制和UDP图传架构重新组织而成。`111.3_p` 没有被修改。
+目标：小车从A到B运行约8秒，钢球全过程保持在O点，最大位置误差不超过
+`±1 cm`。
 
-## 目标
-
-- 小车从A点到B点顺时针行驶，总时间不超过8秒。
-- 行驶过程中钢球保持在O点附近，最大绝对位置误差不超过1 cm。
-- O-5、O、O+5的实测像素坐标分别为 `(176,240)`、`(285,240)`、`(390,240)`。
-
-## 控制结构
+## 当前控制链
 
 ```text
-旧pre钢球视觉
-  -> 三点分段标定得到球位置(cm)
-  -> 真实检测帧计算球速度(cm/s)
-  -> 第4问PI-D外环（含泄漏积分和抗饱和）
-  -> 水管倾角斜率限制
-  -> 推拉机构角度/脉冲换算
-  -> 电机位置环
-  -> 电机速度环
-  -> 加速度与jerk限制
-  -> ZDT 0xF6速度命令
-
-ZDT反馈：0x36编码器位置 + 0x35实时转速
+120 FPS视觉
+  -> 三点标定位置
+  -> 两帧位置差速度 + 轻低通
+  -> 对称PDI外环
+  -> 水管角度变化率限制
+  -> 电机位置/速度/加速度串级环
+  -> Emm V5 0xF6速度命令
 ```
 
-这里不是ZDT位置模式。水管角度只产生电机目标轴位，实际驱动命令始终是 `0xF6` 速度模式。
+- 标定点：`O-5=(167,247)`、`O=(275,247)`、`O+5=(398,247)`。
+- 曝光：手动固定 `60`，MJPG、`640x480@120 FPS`。
+- P：左右统一 `0.110 deg/cm`。
+- D：两帧速度反馈，`0.080 deg/(cm/s)`，极性用于阻挡当前速度。
+- I：只在中心 `±1 cm` 且速度低于 `1 cm/s` 时工作，最大 `±0.12°`。
+- P+I推进限幅：`±0.55°`；加入D后的总制动限幅：`±0.65°`。
+- 电机：1.8°整步量纲 `200 PPR`，软件与0xF6加速度均为 `200 RPM/s`。
+- 启动自动回到已保存的绝对编码器LEVEL零点，不把任意上电位置当零点。
 
-## 树莓派5编译
+## 编译
 
 ```bash
-cd 111.4_rewrite
-chmod +x build.sh
+cd /home/boweny/111.4_p
 ./build.sh
 ```
 
-生成：
-
-```bash
-./ball2_task4_velocity
-```
-
-依赖：
-
-```bash
-sudo apt update
-sudo apt install -y build-essential pkg-config libopencv-dev
-```
+生成 `./ball2_task4_velocity`。构建会先运行串口协议、电机串级环和第四问
+控制器测试。
 
 ## 操作
 
-- 启动前保证水管真实水平，因为当前 `zeroOnStart=true` 会把启动轴位定义为水平零位。
-- 把钢球放在O点，绿色识别连续稳定后按 `SPACE` 开始。
-- 小车开始从A向B顺时针行驶。
-- `F`：到达B点时手动结束考核；程序也会在8秒时自动给出PASS/FAIL。
-- `SPACE`：中止本轮并让水管回平。
-- `R`：暂停时重置视觉跟踪。
-- `Q` 或 `ESC`：安全回零并退出。
+```bash
+cd /home/boweny/111.4_p
+./ball2_task4_velocity
+```
 
-GUI、SSH终端按键和E611 UDP视频可同时使用。SSH/X11显示帧率不参与视觉控制；采集线程始终只提供最新帧。
+程序自动归位后处于 `PAUSED`。等待阶段始终发送图传，并显示未开始的原因。
+球进入O点 `±1 cm` 且基本静止后，画面显示 `READY - PRESS SPACE`，按空格开始：
+
+- `SPACE`：开始或中止本轮。
+- `F`：到达B点时手动结束；程序也会在8秒自动判定。
+- `R`：暂停时重置视觉跟踪。
+- `Q` / `ESC`：回LEVEL并退出。
+
+Windows图传：
+
+```powershell
+ffplay -fflags nobuffer -flags low_delay -framedrop "udp://@:5600"
+```
+
+每次启动会在 `/home/boweny/111.4_p/logs/` 生成一份 `.log` 和 `.csv`，
+记录球位置、两帧速度、P/D/I、目标角度、电机位置与转速、最大误差和丢球时间。
 
 ## 现场调参
 
-所有实机参数集中在 `main.cpp` 的 `makeUserConfig()`。
+参数都在 `main.cpp`：
 
-1. `task4Kp`：球偏离O点后的回中力度。
-2. `task4Kd`：使用钢球速度提前制动，过小会过冲，过大会放大测速噪声。
-3. `task4Ki`：补偿小车持续加速度、安装倾斜和机构静差，只在有限误差范围内积累。
-4. `task4FineKp/task4FineKd`：O点附近的小动作参数。
-5. `task4MaximumAngleDeg`：第四问最大倾角，目前为0.60度。
-6. `task4AngleSlewDegS`：水管目标倾角变化速度，不改变最大幅度。
-7. `motorPositionKpRpmPerStep`：电机目标轴位到目标RPM的位置环。
-8. `motorVelocityKpPerSecond`：实测RPM到命令RPM的速度环。
-9. `motorMaximumAccelerationRpmS` 和 `motorMaximumJerkRpmS3`：软件加速度和jerk限制。
+1. `task4Kp`：回中力度；超调大先小幅降低。
+2. `task4Kd`：速度阻尼；提前减速不足就增加，抖动明显就降低。
+3. `task4Ki`、`task4IntegralLimitDeg`：持续偏向一边时再增加。
+4. `task4DriveAngleLimitDeg`：P+I推进上限。
+5. `task4BrakeAngleLimitDeg`：P+I+D总制动上限。
+6. `task4AngleSlewDegS`：角度响应速度。
 
-先在原地轻推小车检查纠偏方向：小车加速使球向右偏时，程序应输出正倾角、抬高水管右端，让球向左回O。方向相反时只修改 `motorSign`，不要同时改控制器符号。
-
-## 文件职责
-
-- `main.cpp`：沿用第三问视觉宏和全部现场参数。
-- `task4_app.hpp`：第四问流程、8秒考核、终端/UDP和安全退出。
-- `task4_balance_control.hpp`：钢球PI-D外环。
-- `balance_control.hpp`：像素厘米换算、钢球测速和机构换算。
-- `zdt_stepper_uart.hpp`：ZDT协议、电机位置/速度/加速度串级环。
-- `steel_ball_vision.hpp`：与当前 `111.3_p` 完全相同的旧pre视觉。
+先看日志区分问题：位置偏差增长但D太小是阻尼不足；D频繁顶限并换向是D过大或
+视觉速度噪声；速度已接近零但长期偏一侧才应该增加I。

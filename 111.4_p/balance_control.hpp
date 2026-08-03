@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 
 namespace ball_stepper {
 
@@ -87,7 +88,7 @@ public:
                 fromCenter.y * calibrationUnit_.y;
 
             // 左右两侧分别使用自己的像素/cm比例：
-            // x=110 -> O-5cm，x=220 -> O，x=370 -> O+5cm。
+            // 三个实测标定点分别对应O-offset、O、O+offset。
             const double offsetCm = projectedPixels < 0.0 ?
                 projectedPixels * calibrationOffsetCm_ / leftFivePixels_ :
                 projectedPixels * calibrationOffsetCm_ / rightFivePixels_;
@@ -130,52 +131,72 @@ public:
 };
 
 class BallStateEstimator {
-    // 速度只由连续“真实检测帧”计算，绝不使用视觉模块的预测圆心。
-    bool initialized_ = false;
-    double previousPositionCm_ = 0.0;
+    struct Sample {
+        double positionCm = 0.0;
+        double timestamp = 0.0;
+    };
+
+    // Speed uses only real detections.  The derivative baseline is exactly two
+    // measured frames, which is long enough to suppress one-pixel jitter while
+    // still reacting in about 17 ms at 120 FPS.
+    std::deque<Sample> samples_;
+    int differenceFrames_ = 2;
+    double rawTwoFrameSpeedCmS_ = 0.0;
     double filteredSpeedCmS_ = 0.0;
-    double previousTime_ = 0.0;
     double filterSeconds_ = 0.055;
 
 public:
-    explicit BallStateEstimator(double filterSeconds)
-        : filterSeconds_(std::max(0.005, filterSeconds)) {}
+    BallStateEstimator(double filterSeconds, int differenceFrames)
+        : differenceFrames_(differenceFrames),
+          filterSeconds_(std::max(0.005, filterSeconds)) {}
 
     void reset()
     {
-        // 每次重新开始一道题时清除上一轮速度，避免暂停前的旧速度影响新一轮控制。
-        initialized_ = false;
-        previousPositionCm_ = 0.0;
+        // Each task start and every detection gap starts a new real-frame
+        // history.  A stale position must never generate a fake D impulse.
+        samples_.clear();
+        rawTwoFrameSpeedCmS_ = 0.0;
         filteredSpeedCmS_ = 0.0;
-        previousTime_ = 0.0;
     }
+
+    void onMeasurementLost() { reset(); }
 
     void update(double positionCm, double timestamp)
     {
-        // 首帧或两次真实测量间隔太久时速度清零，防止生成虚假巨大速度。
-        if (!initialized_ || timestamp - previousTime_ > 0.12) {
-            initialized_ = true;
-            previousPositionCm_ = positionCm;
+        if (!samples_.empty() &&
+            (timestamp <= samples_.back().timestamp ||
+             timestamp - samples_.back().timestamp > 0.12)) {
+            reset();
+        }
+
+        samples_.push_back({positionCm, timestamp});
+        if (samples_.size() <= static_cast<std::size_t>(differenceFrames_)) {
+            rawTwoFrameSpeedCmS_ = 0.0;
             filteredSpeedCmS_ = 0.0;
-            previousTime_ = timestamp;
             return;
         }
 
-        // 120 FPS理论间隔约8.33 ms；限制异常dt以避免除零或卡顿尖峰。
+        const Sample& twoFramesAgo = samples_[
+            samples_.size() - 1 - static_cast<std::size_t>(differenceFrames_)];
         const double dt = std::clamp(
-            timestamp - previousTime_, 0.002, 0.05);
-        const double rawSpeed =
-            (positionCm - previousPositionCm_) / dt;
+            timestamp - twoFramesAgo.timestamp, 0.004, 0.10);
+        rawTwoFrameSpeedCmS_ =
+            (positionCm - twoFramesAgo.positionCm) / dt;
 
-        // 一阶低通滤波。时间常数越大速度越平稳，但刹车信息也会更滞后。
+        // The low-pass input remains the two-frame difference above.  It only
+        // removes vision noise; a larger measured speed still creates a larger
+        // signed D term in the outer controller.
         const double alpha = dt / (filterSeconds_ + dt);
         filteredSpeedCmS_ +=
-            alpha * (rawSpeed - filteredSpeedCmS_);
+            alpha * (rawTwoFrameSpeedCmS_ - filteredSpeedCmS_);
 
-        previousPositionCm_ = positionCm;
-        previousTime_ = timestamp;
+        while (samples_.size() >
+               static_cast<std::size_t>(differenceFrames_ + 1)) {
+            samples_.pop_front();
+        }
     }
 
+    double rawTwoFrameSpeedCmS() const { return rawTwoFrameSpeedCmS_; }
     double speedCmS() const { return filteredSpeedCmS_; }
 };
 

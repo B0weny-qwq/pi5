@@ -9,9 +9,11 @@
 #include <opencv2/opencv.hpp>
 
 #include <atomic>
+#include <csignal>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -28,7 +30,7 @@ class UdpVideoStreamer {
     int fps_ = 0;
     int bitrateKbps_ = 0;
 
-    cv::VideoWriter writer_;
+    std::FILE* encoderPipe_ = nullptr;
     std::mutex mutex_;
     std::condition_variable condition_;
     cv::Mat pendingFrame_;
@@ -38,20 +40,21 @@ class UdpVideoStreamer {
     std::atomic<bool> failed_{false};
     std::atomic<uint64_t> sentFrames_{0};
 
-    std::string pipeline() const
+    std::string encoderCommand() const
     {
         std::ostringstream text;
-        text << "appsrc is-live=true format=time "
-             << "! queue leaky=downstream max-size-buffers=1 "
-             << "! videoconvert "
-             << "! video/x-raw,format=I420 "
-             << "! x264enc tune=zerolatency speed-preset=ultrafast "
-             << "bitrate=" << bitrateKbps_ << ' '
-             << "key-int-max=" << fps_ << " bframes=0 byte-stream=true "
-             << "! h264parse config-interval=-1 "
-             << "! mpegtsmux alignment=7 "
-             << "! udpsink host=" << host_ << " port=" << port_
-             << " sync=false async=false";
+        text << "ffmpeg -hide_banner -loglevel warning -nostdin "
+             << "-f rawvideo -pixel_format bgr24 "
+             << "-video_size " << width_ << 'x' << height_ << ' '
+             << "-framerate " << fps_ << " -i pipe:0 -an "
+             << "-c:v libx264 -preset ultrafast -tune zerolatency "
+             << "-pix_fmt yuv420p -b:v " << bitrateKbps_ << "k "
+             << "-maxrate " << bitrateKbps_ << "k "
+             << "-bufsize " << bitrateKbps_ * 2 << "k "
+             << "-g " << fps_ << " -keyint_min " << fps_ << " -bf 0 "
+             << "-f mpegts -muxdelay 0 -muxpreload 0 -flush_packets 1 "
+             << "\"udp://" << host_ << ':' << port_
+             << "?pkt_size=1316\"";
         return text.str();
     }
 
@@ -72,7 +75,29 @@ class UdpVideoStreamer {
                 }
 
                 if (!frame.empty()) {
-                    writer_.write(frame);
+                    cv::Mat encodedFrame;
+                    if (frame.channels() == 4) {
+                        cv::cvtColor(frame, encodedFrame, cv::COLOR_BGRA2BGR);
+                    } else if (frame.channels() == 1) {
+                        cv::cvtColor(frame, encodedFrame, cv::COLOR_GRAY2BGR);
+                    } else {
+                        encodedFrame = std::move(frame);
+                    }
+                    if (!encodedFrame.isContinuous()) {
+                        encodedFrame = encodedFrame.clone();
+                    }
+                    const std::size_t bytes = encodedFrame.total() *
+                        encodedFrame.elemSize();
+                    const std::size_t written = std::fwrite(
+                        encodedFrame.data, 1, bytes, encoderPipe_);
+                    std::fflush(encoderPipe_);
+                    if (written != bytes) {
+                        failed_.store(true);
+                        std::fprintf(stderr,
+                            "UDP video ffmpeg pipe stopped after %llu frames\n",
+                            static_cast<unsigned long long>(sentFrames_.load()));
+                        break;
+                    }
                     ++sentFrames_;
                 }
             }
@@ -114,22 +139,25 @@ public:
         hasPendingFrame_ = false;
         pendingFrame_.release();
 
-        const std::string gstPipeline = pipeline();
-        if (!writer_.open(gstPipeline,
-                          cv::CAP_GSTREAMER,
-                          0,
-                          static_cast<double>(fps_),
-                          cv::Size(width_, height_),
-                          true)) {
+        if (std::system("command -v ffmpeg >/dev/null 2>&1") != 0) {
             std::fprintf(stderr,
-                "cannot open GStreamer UDP video pipeline; "
-                "check OpenCV GStreamer support and x264enc/mpegtsmux\n");
+                "cannot start UDP video: ffmpeg is not installed\n");
             return false;
         }
 
+        std::signal(SIGPIPE, SIG_IGN);
+        const std::string command = encoderCommand();
+        encoderPipe_ = ::popen(command.c_str(), "w");
+        if (!encoderPipe_) {
+            std::fprintf(stderr, "cannot open ffmpeg UDP video pipe\n");
+            return false;
+        }
+        std::setvbuf(encoderPipe_, nullptr, _IONBF, 0);
+
         worker_ = std::thread(&UdpVideoStreamer::threadMain, this);
         std::fprintf(stderr,
-            "UDP video ready: h264/mpegts %dx%d@%d %.1f Mbps -> %s:%d\n",
+            "UDP video ready: ffmpeg h264/mpegts %dx%d@%d "
+            "%.1f Mbps -> %s:%d\n",
             width_, height_, fps_, bitrateKbps_ / 1000.0,
             host_.c_str(), port_);
         return true;
@@ -178,7 +206,11 @@ public:
             condition_.notify_one();
             worker_.join();
         }
-        writer_.release();
+        if (encoderPipe_) {
+            std::fflush(encoderPipe_);
+            ::pclose(encoderPipe_);
+            encoderPipe_ = nullptr;
+        }
     }
 };
 

@@ -17,6 +17,11 @@
 #define BALL_CFG_CAMERA_HEIGHT 480
 #define BALL_CFG_CAMERA_FPS 120
 
+// 复用第一问当前稳定曝光；需要现场改亮度时只改这一处。
+#define BALL_CFG_CONFIGURE_EXPOSURE 1
+#define BALL_CFG_USE_MANUAL_EXPOSURE 1
+#define BALL_CFG_EXPOSURE_ABSOLUTE 60.0
+
 // Restore the visual parameters from the archived 111.3_pre snapshot.
 #define BALL_CFG_RADIUS_MIN 7.5f
 #define BALL_CFG_RADIUS_MAX 16.0f
@@ -94,19 +99,17 @@ ball_stepper::AppConfig makeUserConfig()
     config.cameraWidth = BALL_CFG_CAMERA_WIDTH;
     config.cameraHeight = BALL_CFG_CAMERA_HEIGHT;
     config.cameraFps = BALL_CFG_CAMERA_FPS;
+    config.cameraFourcc = "MJPG";
 
     // 固定安装后关闭自动对焦，避免识别过程中镜头反复改变清晰度和钢球外观。
     config.disableAutofocus = true;
 
-    // 【当前保持false】完全不让OpenCV改曝光。你已经验证这只摄像头原设置能
-    // 640x480 MJPG 120 FPS；程序强制切自动/手动曝光反而可能掉帧并增加拖影。
-    // 如果必须手动曝光，先用v4l2-ctl确认单位，保证曝光时间小于8.3 ms。
-    config.configureExposure = false;
-    config.useManualExposure = false;
-    config.exposureAbsolute = 45.0;  // 如后续重开手动曝光，先从4.5 ms试起。
+    config.configureExposure = BALL_CFG_CONFIGURE_EXPOSURE != 0;
+    config.useManualExposure = BALL_CFG_USE_MANUAL_EXPOSURE != 0;
+    config.exposureAbsolute = BALL_CFG_EXPOSURE_ABSOLUTE;
 
     // ---------------- 2. ROI和水管轴线 ----------------
-// 黄框和实际识别ROI都覆盖整段可见水管；最新三个位置为x=176、285、390。
+// 黄框和实际识别ROI都覆盖整段可见水管；最新三个位置为x=167、275、398。
     // 两者使用同一个矩形，避免钢球明明还在黄色框内却已经离开算法搜索范围。
     config.pipeDisplayArea = cv::Rect(10, 210, 535, 65);
     config.roi = config.pipeDisplayArea;
@@ -114,20 +117,20 @@ ball_stepper::AppConfig makeUserConfig()
 
     // 摄像头目前看不到整根水管，因此先用第3题-5 cm和+5 cm两个实测点
     // 定义运动轴线方向；实际位置换算由下面的三点分段标定完成。
-    config.axisLeft = cv::Point2f(176.0f, 240.0f);
-    config.axisRight = cv::Point2f(390.0f, 240.0f);
+    config.axisLeft = cv::Point2f(167.0f, 247.0f);
+    config.axisRight = cv::Point2f(398.0f, 247.0f);
     config.axisConfigured = true;
 
     // 【必须实测】上面两个图像点之间对应的真实有效滚球长度，单位厘米。
     config.pipeLengthCm = 10.0;
 
-    // 实测三点标定：O-5/O/O+5的x分别为176/285/390。
-    // 左侧5 cm对应109像素，右侧5 cm对应105像素，分段换算会分别使用。
-    // 三个点当前都使用实测水管轴线y=240。
+    // 实测三点标定：O-5/O/O+5的x分别为167/275/398。
+    // 左侧5 cm对应108像素，右侧5 cm对应123像素，分段换算会分别使用。
+    // 三个点当前都使用实测水管轴线y=247。
     config.useThreePointPositionCalibration = true;
-    config.minus5CalibrationPoint = cv::Point2f(176.0f, 240.0f);
-    config.centerCalibrationPoint = cv::Point2f(285.0f, 240.0f);
-    config.plus5CalibrationPoint = cv::Point2f(390.0f, 240.0f);
+    config.minus5CalibrationPoint = cv::Point2f(167.0f, 247.0f);
+    config.centerCalibrationPoint = cv::Point2f(275.0f, 247.0f);
+    config.plus5CalibrationPoint = cv::Point2f(398.0f, 247.0f);
 
     config.positionCalibrationOffsetCm = 5.0;
 
@@ -138,30 +141,59 @@ ball_stepper::AppConfig makeUserConfig()
     config.task4TargetCm = config.targetCm;
     config.task4EvaluationSeconds = 8.0;
     config.task4AllowedErrorCm = 1.0;
-    config.task4StartToleranceCm = 0.50;
-    config.task4StartSpeedCmS = 1.0;
+    // 等待阶段球只要位于O点±1 cm并基本静止即可开始。
+    config.task4StartToleranceCm = 1.00;
+    config.task4StartSpeedCmS = 2.0;
     config.task4StartConfirmFrames = 6;
 
-    // 位置项把球拉回O，速度项提前制动，泄漏积分补偿小车持续加速度和机构静差。
-    config.task4Kp = 0.30;
-    config.task4Kd = 0.12;
-    config.task4FineKp = 0.15;
-    config.task4FineKd = 0.055;
-    config.task4FineZoneCm = 0.30;
-    config.task4FineSpeedCmS = 1.8;
-    config.task4Ki = 0.018;
+    // 复用第一问回程已验证的对称PD量级。D来自两帧位置差，极性与P一致，
+    // 钢球向哪边运动就提前抬高同侧水管，直接阻挡速度。
+    config.task4Kp = 0.110;
+    config.task4Kd = 0.080;
+
+    // I只在中心±1 cm且速度较小时工作，用于补偿小车持续加速度和机构静差。
+    // 最大只贡献±0.12°，换边立即清掉旧极性积分。
+    config.task4Ki = 0.150;
+    config.task4IntegralZoneCm = 1.00;
+    config.task4IntegralSpeedLimitCmS = 1.00;
     config.task4IntegralLimitDeg = 0.12;
-    config.task4IntegralEnableErrorCm = 1.5;
-    config.task4IntegralLeakSeconds = 6.0;
+    config.task4IntegralLeakSeconds = 4.0;
     config.task4LevelTrimDeg = 0.0;
-    config.task4DeadbandCm = 0.05;
-    config.task4StopSpeedCmS = 0.35;
-    config.task4MaximumAngleDeg = 0.60;
-    config.task4AngleSlewDegS = 3.0;
+    config.task4DeadbandCm = 0.02;
+    config.task4StopSpeedCmS = 0.15;
+
+    // P/I/vehicle-feedforward share the drive envelope. D is added last as
+    // braking authority. With no vehicle encoder source, FF stays exactly zero.
+    config.task4DriveAngleLimitDeg = 0.80;
+    config.task4BrakeAngleLimitDeg = 0.91;
+    config.task4AngleSlewDegS = 8.0;
     config.task4LossFailureMs = 180;
 
-    // 继续使用第三问实机上已经验证过的钢球测速滤波。
-    config.speedFilterSeconds = 0.035;
+    // ---------------- 4. Chassis acceleration feedforward ----------------
+    // The chassis encoder is cleared every 50 ms and returns one speed value.
+    // Typical values are 50-100 and normal cruise is about 80. A future
+    // VehicleEncoderSource only supplies that value and its sample timestamp.
+    config.task4VehicleEncoderCruiseValue = 80.0;
+    config.task4VehicleEncoderMaximumAbsValue = 150.0;
+    config.task4VehicleEncoderDirectionSign = +1.0;
+    config.task4VehicleSpeedFilterSeconds = 0.035;
+    config.task4VehicleAccelerationFilterSeconds = 0.060;
+    config.task4VehicleAccelerationDecaySeconds = 0.120;
+    config.task4VehicleAccelerationDeadbandUnitsS = 15.0;
+    config.task4VehicleAccelerationLimitUnitsS = 2000.0;
+
+    // Positive chassis acceleration toward axisRight makes the ball lag left,
+    // so the default compensation is a negative pipe angle. Flip only this
+    // sign if the supplied chassis-speed coordinate is opposite.
+    config.task4VehicleAccelerationAngleSign = -1.0;
+    config.task4VehicleFeedforwardDegPerUnitS = 0.00040;
+    config.task4VehicleFeedforwardLimitDeg = 0.65;
+    config.task4VehicleInputTimeoutMs = 140;
+    config.task4VehicleSampleMaximumGapMs = 120;
+
+    // v[n]=(x[n]-x[n-2])/(t[n]-t[n-2])，之后只做很轻的低通。
+    config.speedDifferenceFrames = 2;
+    config.speedFilterSeconds = 0.020;
 
     // 机构总安全限位大于第四问控制限幅，形成第二层保护。
     config.maximumPipeAngleDeg = 0.91;
@@ -173,11 +205,11 @@ ball_stepper::AppConfig makeUserConfig()
     // 【必须实测】水管固定铰链中心到连杆与水管连接点中心的距离。
     config.actuatorDistanceMm = 250.0;
 
-    // 【必须与ZDT细分设置一致】200整步×细分数：8细分1600，16细分3200。
-    config.pulsesPerRevolution = 3200;
+    // 驱动器当前为1.8°整步模式，命令量纲按200 PPR计算。
+    config.pulsesPerRevolution = 200;
 
     // +1表示正脉冲应使axisRight端升高；实际相反时只改成-1。
-    config.motorSign = 1;
+    config.motorSign = +1;
 
     // ---------------- 6. 水管角度到电机脉冲实测标定表 ----------------
     // 【最终实机强烈建议填写】没有标定表时使用理想曲柄公式，只适合检查思路。
@@ -214,43 +246,49 @@ ball_stepper::AppConfig makeUserConfig()
     // 位置外环还会按剩余距离自动降低目标RPM，不会一直满速冲向目标轴位。
     config.motorRpm = 6;
 
-    // ZDT 0xF6硬件曲线加减速档。手册规定0会关闭曲线加减速，本项目禁止为0。
-    // 档位12约对应82 RPM/s，略高于下面的软件最大加速度65 RPM/s。
-    config.motorAcceleration = 12;
+    // 电机加速度与第一问一致，统一使用200 RPM/s，不能给满量程。
+    config.motorSpeedSlopeRpmS = 200;
 
     // 每周期读取0x36位置和0x35速度，再发送一条0xF6；115200波特率下50 Hz有余量。
     config.motorCommandHz = 50;
 
-    // 轴位外环仍受25 RPM和制动速度上限约束，不会因目标脉冲翻倍而无限加速。
-    config.motorPositionKpRpmPerStep = 0.045;
+    // 轴位外环受6 RPM和制动速度上限约束，不会因目标脉冲变化而无限加速。
+    config.motorPositionKpRpmPerStep = 0.72;
 
     // 速度误差乘以本项得到期望加速度；ZDT内部仍使用自己的20 kHz速度闭环。
     config.motorVelocityKpPerSecond = 8.0;
 
     // 软件加速度环和跃度限制。推拉连杆换向时先平滑减速过零，再反向加速。
-    config.motorMaximumAccelerationRpmS = 20.0;
+    config.motorMaximumAccelerationRpmS = 200.0;
     config.motorMaximumJerkRpmS3 = 300.0;
 
-    // 制动速度公式使用45 RPM/s，低于最大65，补偿加速度经跃度限制后不能瞬间建立。
-    config.motorBrakingAccelerationRpmS = 8.0;
+    // 制动距离模型与软件和驱动器统一按200 RPM/s计算。
+    config.motorBrakingAccelerationRpmS = 200.0;
 
-    // 约1.5脉冲且实测转速不高于1.5 RPM才认为目标轴位已稳定。
-    config.motorPositionToleranceSteps = 1.5;
+    // 误差约0.35脉冲且实测转速不高于1 RPM才认为目标轴位已稳定。
+    config.motorPositionToleranceSteps = 0.35;
     config.motorStopSpeedRpm = 1.0;
     config.motorEncoderSpeedFilterSeconds = 0.04;
 
-    // 0.91°按当前曲柄模型约136脉冲，软限位收回到±180并保留余量。
-    config.motorSoftLimitSteps = 180;
+    // 0.91°按200 PPR量纲约10脉冲，软限位设为±11脉冲。
+    config.motorSoftLimitSteps = 11;
 
-    // 驱动器菜单Response必须为Receive或Both，所有控制命令都核对02成功应答。
-    // This driver is configured without control-command replies. Position and
-    // speed queries still require valid 0x36/0x35 responses every motor cycle.
+    // 驱动器Response当前为None；位置和速度查询仍返回有效数据，0xF6不等ACK。
     config.motorExpectCommandAck = false;
-    config.motorReplyTimeoutMs = 15;
+    config.motorReplyTimeoutMs = 20;
+    config.motorMaximumConsecutiveFailures = 3;
 
-    // 【极其重要】motorEnabled=true时这里也必须改true，程序才允许启动。
-    // 它会把启动瞬间的当前位置清为0；此时水管必须真实水平且未顶机械限位。
-    config.zeroOnStart = true;
+    // 正式模式先回到已保存的绝对编码器LEVEL零点，再清运行时位置坐标。
+#if defined(BALL_E611_VIDEO_ONLY)
+    config.absoluteEncoderHomeOnStart = false;
+    config.zeroOnStart = false;
+#else
+    config.absoluteEncoderHomeOnStart = true;
+    config.absoluteEncoderHomeRpm = 6;
+    config.absoluteEncoderHomeTimeoutMs = 5000;
+    config.absoluteEncoderHomePollMs = 40;
+    config.zeroOnStart = false;
+#endif
 
     // ---------------- 8. ZDT启动与退出等待 ----------------
     // 这些等待让驱动器有时间完成使能、停止和清零，一般保持默认。
@@ -262,9 +300,9 @@ ball_stepper::AppConfig makeUserConfig()
     config.exitReturnTimeoutMs = 1800;
 
     // ---------------- 9. 丢球保护 ----------------
-    // 短时运动模糊先保持最后角度；超过150 ms开始平滑回水平，500 ms归零。
-    config.lostHoldMs = 150;
-    config.lostNeutralMs = 500;
+    // 短时运动模糊先保持最后角度；超过60 ms开始回水平，180 ms归零并判丢球。
+    config.lostHoldMs = 60;
+    config.lostNeutralMs = 180;
 
     // ---------------- 10. 启动、显示和数据记录 ----------------
     // false最安全：启动后处于PAUSED并保持水平，按空格才进入闭环。
@@ -274,6 +312,10 @@ ball_stepper::AppConfig makeUserConfig()
     config.gui = false;
     config.terminalKeys = true;
     config.csv = false;
+    config.runtimeLogEnabled = true;
+    config.runtimeLogDirectory = "logs";
+    config.runtimeLogEvent = "task4_balance";
+    config.runtimeLogIntervalMs = 100;
 
     // 每个控制帧都提交最新预览。SSH/X11显示慢时只丢旧预览帧，
     // 不参与钢球识别、丢球计数或电机控制。
@@ -283,10 +325,10 @@ ball_stepper::AppConfig makeUserConfig()
     // H.264/MPEG-TS，通过树莓派eth0向场外电脑发送。识别仍保持120 FPS，
     // 图传独立限为30 FPS；VLC打开udp://@:5600即可显示和录像。
     config.videoStreamEnabled = true;
-    config.videoStreamHost = "192.168.50.1";
+    config.videoStreamHost = "192.168.137.1";
     config.videoStreamPort = 5600;
     config.videoStreamFps = 30;
-    config.videoStreamBitrateKbps = 4000;
+    config.videoStreamBitrateKbps = 1000;
 
     // ========================================================================
     //                       B. 系统参数修改区结束
@@ -310,7 +352,7 @@ int main()
     const ball_stepper::AppConfig config = makeUserConfig();
     std::fprintf(stderr,
         "TASK4 VELOCITY: O=(%.1f,%.1f) limit=%.2fcm time=%.1fs "
-        "PI-D=%.3f/%.3f/%.3f angle=%.3fdeg\n",
+        "PDI=%.3f/%.3f/%.3f drive=%.3f brake=%.3fdeg\n",
         config.centerCalibrationPoint.x,
         config.centerCalibrationPoint.y,
         config.task4AllowedErrorCm,
@@ -318,7 +360,8 @@ int main()
         config.task4Kp,
         config.task4Ki,
         config.task4Kd,
-        config.task4MaximumAngleDeg);
+        config.task4DriveAngleLimitDeg,
+        config.task4BrakeAngleLimitDeg);
     return ball_stepper::runTask4VelocityApp(config);
 }
 
