@@ -133,6 +133,9 @@
 #ifndef BALL_CFG_REFINE_RESIDUAL_MAX
 #define BALL_CFG_REFINE_RESIDUAL_MAX 2.0f
 #endif
+#ifndef BALL_CFG_HOUGH_RADIAL_SUPPORT_MIN
+#define BALL_CFG_HOUGH_RADIAL_SUPPORT_MIN 0.70f
+#endif
 
 namespace ball_stepper {
 
@@ -200,6 +203,9 @@ static_assert(BALL_CFG_HOUGH_CANNY_HIGH > 0.0 &&
               "invalid Hough parameter");
 static_assert(HOUGH_INTERVAL >= 1 && HOUGH_MAX_CANDIDATES >= 1,
               "invalid Hough scheduling parameter");
+static_assert(BALL_CFG_HOUGH_RADIAL_SUPPORT_MIN >= 0.0f &&
+              BALL_CFG_HOUGH_RADIAL_SUPPORT_MIN <= 1.0f,
+              "invalid radial edge support threshold");
 static_assert(INITIAL_ACQUIRE_GATE_PX > BALL_RADIUS_MAX,
               "initial acquire gate is too small");
 
@@ -235,6 +241,7 @@ struct Candidate {
     float score = 0.0f;
     float contrast = 0.0f;
     float edgeSupport = 0.0f;
+    float radialEdgeSupport = 0.0f;
     float ringMean = 0.0f;
     float innerStd = 0.0f;
     float fitQuality = 0.0f;
@@ -484,11 +491,17 @@ class SteelBallDetector {
         Candidate candidate;
         const cv::Point2f center = circle.center;
         const float radius = circle.radius;
+        // Keep measurements even for rejected circles so the offline
+        // diagnostic build can show which gate removed a real ball.
+        candidate.center = center;
+        candidate.radius = radius;
+        candidate.fitQuality = circle.quality;
         if (radius < BALL_RADIUS_MIN || radius > BALL_RADIUS_MAX) {
             return candidate;
         }
 
         const float axisDistance = distanceToAxis(center);
+        candidate.axisDistance = axisDistance;
         if (axisGateEnabled_ && axisDistance > AXIS_GATE_PX) {
             return candidate;
         }
@@ -555,33 +568,60 @@ class SteelBallDetector {
         // 48个方向统计圆周是否存在真实梯度，防止只靠局部弧线组成假圆。
         constexpr int EDGE_SAMPLES = 48;
         int supportedEdges = 0;
+        int radialEdges = 0;
         for (int index = 0; index < EDGE_SAMPLES; ++index) {
             const float angle = static_cast<float>(
                 2.0 * CV_PI * index / EDGE_SAMPLES);
+            const float radialX = std::cos(angle);
+            const float radialY = std::sin(angle);
             float strongest = 0.0f;
+            float strongestAlignment = 0.0f;
             for (int radial = -2; radial <= 2; ++radial) {
                 const float sampleRadius = radius + radial;
                 const int x = cvRound(center.x +
-                                      std::cos(angle) * sampleRadius);
+                                      radialX * sampleRadius);
                 const int y = cvRound(center.y +
-                                      std::sin(angle) * sampleRadius);
+                                      radialY * sampleRadius);
                 if (x >= 0 && x < gradient_.cols &&
                     y >= 0 && y < gradient_.rows) {
-                    strongest = std::max(
-                        strongest, gradient_.at<float>(y, x));
+                    const float magnitude = gradient_.at<float>(y, x);
+                    if (magnitude > strongest) {
+                        strongest = magnitude;
+                        const float gx = gradientX_.at<float>(y, x);
+                        const float gy = gradientY_.at<float>(y, x);
+                        strongestAlignment = std::abs(
+                            gx * radialX + gy * radialY) /
+                            std::max(1.0f, magnitude);
+                    }
                 }
             }
             supportedEdges += strongest >= BALL_CFG_REFINE_GRADIENT_MIN;
+            radialEdges +=
+                strongest >= BALL_CFG_REFINE_GRADIENT_MIN &&
+                strongestAlignment >= 0.60f;
         }
 
         const float edgeSupport =
             static_cast<float>(supportedEdges) / EDGE_SAMPLES;
+        const float radialEdgeSupport =
+            static_cast<float>(radialEdges) / EDGE_SAMPLES;
+        candidate.contrast = contrast;
+        candidate.edgeSupport = edgeSupport;
+        candidate.radialEdgeSupport = radialEdgeSupport;
+        candidate.ringMean = ringMean;
+        candidate.innerStd = innerStd;
+        if (radialEdgeSupport < BALL_CFG_HOUGH_RADIAL_SUPPORT_MIN) {
+            return candidate;
+        }
         const float brightFraction =
             static_cast<float>(brightCount) / innerCount;
         const float darkFraction =
             static_cast<float>(darkCount) / innerCount;
 
-        const float contrastScore = unitScore((contrast - 1.0f) / 34.0f);
+        // 灰色金属水管会让钢球的平均亮度高于或低于外环；二者都应视为
+        // 有效局部对比，方向保留在candidate.contrast中供日志分析。
+        const float contrastScore = unitScore(
+            (std::abs(contrast) - 1.0f) / 34.0f);
         const float edgeScore = unitScore((edgeSupport - 0.24f) / 0.66f);
         const float textureScore = unitScore((innerStd - 4.0f) / 30.0f);
         const float reflectionScore = unitScore(
@@ -603,18 +643,10 @@ class SteelBallDetector {
             0.10f * radiusScore +
             0.09f * circle.quality +
             0.05f * axisScore;
+        candidate.score = score;
         if (score < MIN_DETECTION_SCORE) return candidate;
 
         candidate.valid = true;
-        candidate.center = center;
-        candidate.radius = radius;
-        candidate.score = score;
-        candidate.contrast = contrast;
-        candidate.edgeSupport = edgeSupport;
-        candidate.ringMean = ringMean;
-        candidate.innerStd = innerStd;
-        candidate.fitQuality = circle.quality;
-        candidate.axisDistance = axisDistance;
         candidate.houghOnly = true;
         return candidate;
     }
@@ -839,7 +871,7 @@ class SteelBallDetector {
                 -std::abs(radius - BALL_RADIUS_EXPECTED) /
                 std::max(2.0f, BALL_RADIUS_EXPECTED * 0.30f));
             const float contrastScore = unitScore(
-                (contrast - 3.0f) / 30.0f);
+                (std::abs(contrast) - 3.0f) / 30.0f);
             const float textureScore = unitScore(
                 (innerStd - 2.0f) / 24.0f);
             const float shapeScore =
@@ -952,8 +984,8 @@ class SteelBallDetector {
                     std::max(2.0f, BALL_RADIUS_EXPECTED * 0.25f));
                 // 锁定后预测位置权重较高，防止运动模糊时跳向附近螺丝。
                 candidate.score =
-                    0.68f * candidate.score +
-                    0.25f * temporalScore +
+                    0.48f * candidate.score +
+                    0.45f * temporalScore +
                     0.07f * radiusContinuity;
             } else if (pending_.valid) {
                 const float radiusContinuity = std::exp(
@@ -1098,8 +1130,12 @@ class SteelBallDetector {
             const cv::Point2f initialCenter(
                 circle[0] + search.x,
                 circle[1] + search.y);
-            const RefinedCircle refined =
-                refineCircle(initialCenter, circle[2]);
+            // The new pipe rails and the ball's dark halo can pull a local
+            // least-squares fit away from the reliable Hough center. Temporal
+            // prediction and the six-frame acquire gate provide continuity,
+            // so score the raw circle in both acquisition and tracking.
+            const RefinedCircle refined{
+                initialCenter, circle[2], 0.55f};
             addCandidate(candidates, scoreCircle(refined));
         }
         lastValidCandidates_ += static_cast<int>(candidates.size());
@@ -1225,25 +1261,12 @@ public:
                     300.0f * dt + misses_ * 14.0f,
                 TRACK_GATE_MIN_PX,
                 TRACK_GATE_MAX_PX);
-            const float objectHalfWidth = std::max(
-                BALL_RADIUS_MAX + 4.0f,
-                DARK_BLOB_WIDTH_MAX * 0.5f + 4.0f);
-            const int halfSize = cvCeil(
-                trackingGate + objectHalfWidth);
-            search = boundedVisionRect(
-                cv::Rect(cvRound(predicted.x) - halfSize,
-                         cvRound(predicted.y) - halfSize,
-                         halfSize * 2 + 1,
-                         halfSize * 2 + 1),
-                frame.size()) & allowed;
-
-            if (misses_ >= 5) {
-                // 运动模糊连续丢几帧后，预测圆心可能已落后真实钢球。
-                // 暂时扩大到整个第3题ROI；候选仍受逐步扩大的预测门限、
-                // 真实尺寸、轴线、外观和半径连续性共同约束。
-                trackingGate = TRACK_GATE_MAX_PX;
-                search = allowed;
-            }
+            // Keep the full narrow pipe strip for Hough voting. A roughly
+            // 57x45 local crop removed too much circular context and caused
+            // H=0 even when the same frame was detected in the 535x45 strip.
+            // Candidate acceptance still uses the predicted-position gate.
+            search = allowed;
+            if (misses_ >= 5) trackingGate = TRACK_GATE_MAX_PX;
         } else {
             predicted = acquireAnchorConfigured_ ?
                 acquireAnchor_ :
@@ -1263,9 +1286,10 @@ public:
         }
 
         if (locked_ && candidate.valid && candidate.houghOnly &&
-            misses_ < 2) {
-            // 暗斑短暂漏一两帧时先沿用预测位置，不立即切换到未经验证的霍夫圆。
-            // 连续两帧都没有暗斑后才允许霍夫备用，兼顾运动模糊时不断轨。
+            lastDarkBlobCandidates_ > 0 && misses_ < 2) {
+            // 暗斑通道本帧确实找到候选但未与霍夫一致时，先沿用预测位置，
+            // 避免在两个物体之间跳转。新灰管上暗斑通道可能长期为0；此时
+            // 已通过局部预测、轴线、半径连续性和外观评分的霍夫圆立即接管。
             candidate = Candidate{};
         }
 
@@ -1306,7 +1330,8 @@ public:
             }
         } else if (candidate.valid &&
                    candidate.score >= MIN_ACQUIRE_SCORE &&
-                   candidate.contrast >= ACQUIRE_CONTRAST_MIN &&
+                   std::abs(candidate.contrast) >=
+                       ACQUIRE_CONTRAST_MIN &&
                    candidate.edgeSupport >= ACQUIRE_EDGE_SUPPORT_MIN &&
                    candidate.ringMean >= ACQUIRE_RING_MEAN_MIN &&
                    candidate.innerStd >= ACQUIRE_INNER_STD_MIN) {

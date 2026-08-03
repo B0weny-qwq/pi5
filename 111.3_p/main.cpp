@@ -17,9 +17,9 @@
 #define BALL_CFG_CAMERA_HEIGHT 480
 #define BALL_CFG_CAMERA_FPS 120
 
-// Restore the visual parameters from the archived 111.3_pre snapshot.
-#define BALL_CFG_RADIUS_MIN 7.5f
-#define BALL_CFG_RADIUS_MAX 16.0f
+// 新灰色水管实测：钢球本体半径约9～11 px；排除约15 px的外层阴影圆。
+#define BALL_CFG_RADIUS_MIN 8.0f
+#define BALL_CFG_RADIUS_MAX 13.5f
 #define BALL_CFG_RADIUS_EXPECTED 11.0f
 
 #define BALL_CFG_MIN_DETECTION_SCORE 0.34f
@@ -31,47 +31,51 @@
 // 否则真球运动后大量霍夫候选会造成连续BALL LOST。
 #define BALL_CFG_AMBIGUITY_GAP 0.050f
 
-#define BALL_CFG_ACQUIRE_FRAMES 3
+#define BALL_CFG_ACQUIRE_FRAMES 6
 
 #define BALL_CFG_MAX_MISSES 18
 
 // 首次连续确认和锁定后的预测搜索门限，单位像素。
 // 当前钢球每帧正常位移远小于原来的20～58 px；门限过大会允许绿圈跳到管壁假圆。
 #define BALL_CFG_ACQUIRE_GATE_PX 16.0f
-#define BALL_CFG_TRACK_GATE_MIN_PX 14.0f
-#define BALL_CFG_TRACK_GATE_MAX_PX 90.0f
+#define BALL_CFG_TRACK_GATE_MIN_PX 10.0f
+#define BALL_CFG_TRACK_GATE_MAX_PX 45.0f
 
-// 首次锁定必须满足的金属钢球外观条件；一次只改一个参数。
-#define BALL_CFG_ACQUIRE_CONTRAST_MIN 8.0f
-#define BALL_CFG_ACQUIRE_EDGE_SUPPORT_MIN 0.28f
+// 新灰管上的钢球可能比外环亮或暗，因此对比度按绝对值判断。
+// 真球样本的圆边缘支持约0.98～1.00、内部纹理标准差约29～65。
+#define BALL_CFG_ACQUIRE_CONTRAST_MIN 0.0f
+#define BALL_CFG_ACQUIRE_EDGE_SUPPORT_MIN 0.65f
 #define BALL_CFG_ACQUIRE_RING_MEAN_MIN 40.0f
-#define BALL_CFG_ACQUIRE_INNER_STD_MIN 2.5f
+#define BALL_CFG_ACQUIRE_INNER_STD_MIN 20.0f
 
 // ---------------- 灰度霍夫圆专用参数 ----------------
 
 // 轴线已按最新画面的y=240标定，正式识别启用轴线过滤，排除管外螺丝和圆孔。
 #define BALL_CFG_USE_AXIS_GATE 1
-#define BALL_CFG_AXIS_GATE_PX 14.0f
+#define BALL_CFG_AXIS_GATE_PX 10.0f
 
 // 局部灰度增强、霍夫圆和圆心二次拟合参数。一般保持以下实测初值。
-// 由+16降到+10，让白色水管少一点过曝；这里只改变算法输入灰度。
+// 真实曝光固定在实测最亮的60档后，算法输入再小幅+10；继续加到+20
+// 会削弱球周围暗环。该处理不延长曝光时间，不降低120 FPS帧率。
 #define BALL_CFG_GRAY_BRIGHTNESS 10
 #define BALL_CFG_CLAHE_CLIP_LIMIT 2.2
 #define BALL_CFG_HOUGH_DP 1.0
 #define BALL_CFG_HOUGH_CANNY_HIGH 74.0
-#define BALL_CFG_HOUGH_ACCUM_ACQUIRE 9.0
-#define BALL_CFG_HOUGH_ACCUM_TRACK 10.0
+#define BALL_CFG_HOUGH_ACCUM_ACQUIRE 8.0
+#define BALL_CFG_HOUGH_ACCUM_TRACK 8.0
 #define BALL_CFG_REFINE_GRADIENT_MIN 16.0f
 #define BALL_CFG_REFINE_RESIDUAL_MAX 2.0f
+// 真球圆周梯度基本指向圆心；灰槽水平反光假圆实测低于0.70。
+#define BALL_CFG_HOUGH_RADIAL_SUPPORT_MIN 0.72f
 
-// 不再为SSH预览帧率削减识别。每帧运行霍夫并精修全部合理候选；截图中已有
-// H=38但旧代码只检查前4个，这正是钢球存在却V=0的主要原因之一。
+// 新灰管每帧会产生约24～42个霍夫圆；精修前16个，避免真球因票数不是前4而漏检。
+// 锁定后仍主要依靠局部预测窗口，扩大首次候选数不会放宽运动轨迹门限。
 #define BALL_CFG_HOUGH_INTERVAL 8
-#define BALL_CFG_HOUGH_MAX_CANDIDATES 4
+#define BALL_CFG_HOUGH_MAX_CANDIDATES 16
 
-// 第3题开始前球必须在O点。首次捕获只接受O点附近75像素内的候选，
-// 这样无球或刚启动时不会锁到水管右端固定螺丝。
-#define BALL_CFG_INITIAL_ACQUIRE_GATE_PX 55.0f
+// 第3题开始前球必须在O点。新管中点实测为x约269、y约247；
+// 首次只接收锚点15 px内的候选，之后跟踪仍覆盖完整左右行程。
+#define BALL_CFG_INITIAL_ACQUIRE_GATE_PX 15.0f
 
 // ====================== A. 视觉参数修改区结束 ======================
 
@@ -99,18 +103,18 @@ ball_stepper::AppConfig makeUserConfig()
     // 固定安装后关闭自动对焦，避免识别过程中镜头反复改变清晰度和钢球外观。
     config.disableAutofocus = true;
 
-    // 【当前保持false】完全不让OpenCV改曝光。你已经验证这只摄像头原设置能
-    // 640x480 MJPG 120 FPS；程序强制切自动/手动曝光反而可能掉帧并增加拖影。
-    // 如果必须手动曝光，先用v4l2-ctl确认单位，保证曝光时间小于8.3 ms。
-    config.configureExposure = false;
-    config.useManualExposure = false;
-    config.exposureAbsolute = 45.0;  // 如后续重开手动曝光，先从4.5 ms试起。
+    // 新灰管按同一摄像头会话逐档实测，60档的ROI平均亮度最高且12帧波动
+    // 只有约0.41灰度；继续增大到65会进入另一档较暗的传感器时序。
+    // 60通常对应约6.0 ms，仍短于120 FPS的8.3 ms单帧周期。
+    config.configureExposure = true;
+    config.useManualExposure = true;
+    config.exposureAbsolute = 60.0;
 
     // ---------------- 2. ROI和水管轴线 ----------------
-// 黄框和实际识别ROI都覆盖整段可见水管；最新三个位置为x=167、275、398。
-    // 两者使用同一个矩形，避免钢球明明还在黄色框内却已经离开算法搜索范围。
+// 黄框仍显示整段水管；识别只处理轴线附近的45 px高窄带，排除上下金属边。
+    // 横向仍覆盖完整左右行程，不限制钢球到达+5 cm和-5 cm。
     config.pipeDisplayArea = cv::Rect(10, 210, 535, 65);
-    config.roi = config.pipeDisplayArea;
+    config.roi = cv::Rect(10, 225, 535, 45);
     config.drawPipeDetectionArea = true;
 
     // 摄像头目前看不到整根水管，因此先用第3题-5 cm和+5 cm两个实测点
@@ -127,7 +131,7 @@ ball_stepper::AppConfig makeUserConfig()
     // 三个点当前都使用实测水管轴线y=247。
     config.useThreePointPositionCalibration = true;
     config.minus5CalibrationPoint = cv::Point2f(167.0f, 247.0f);
-    config.centerCalibrationPoint = cv::Point2f(275.0f, 247.0f);
+    config.centerCalibrationPoint = cv::Point2f(269.0f, 247.0f);
     config.plus5CalibrationPoint = cv::Point2f(398.0f, 247.0f);
 
     // 兼容基础控制模块的初始目标，比赛运行时实际目标由题目管理器自动给出。
@@ -154,45 +158,83 @@ ball_stepper::AppConfig makeUserConfig()
     config.task3TimeLimitMs = 5000;
 
     // ---------------- 4. 钢球 PDI 外环 ----------------
-    // angle = Kp(direction) * (position - target)
-    //       + Kd * two-frame velocity + Ki * I.
-    // Negative angle moves the ball right; positive angle moves it left. The
-    // measured linkage needs much more rightward authority, so the two P gains
-    // are intentionally different. These remain feedback gains, not fixed
-    // travel angles.
-    config.task3MoveRightPositionKpDegPerCm = 0.350;
-    config.task3MoveLeftPositionKpDegPerCm = 0.080;
+    // 输出角度 = Kp(按运动方向选择) * (钢球位置 - 目标位置)
+    //          + Kd * 两帧差速度 + Ki * 误差积分。
+    // 负角度使球向右运动，正角度使球向左运动；以下参数全部是反馈增益，
+    // 不是写死的固定运动角度。机构左右传动能力不同，因此左右 P、限幅和脱困量分开设置。
+
+    // 向右运动的位置 P 增益，单位 deg/cm；增大后右移响应更快、更硬，过大会过冲或振荡。
+    config.task3MoveRightPositionKpDegPerCm = 0.200;
+
+    // 向左运动的位置 P 增益，单位 deg/cm；增大后左移响应更快，过大会在左侧来回振荡。
+    config.task3MoveLeftPositionKpDegPerCm = 0.060;
+
+    // 速度 D 增益，单位 deg/(cm/s)；直接使用 x[n] 与 x[n-2] 算出的原始速度。
+    // 增大可更早抑制高速冲向目标的趋势，但过大会放大视觉位置抖动并引起高频摆动。
     config.task3VelocityKdDegPerCmS = 0.040;
 
-    // I opens only during the slower final 3 cm. Its maximum output is
-    // 0.400 * 1.00 = 0.400 deg and every target reversal clears it.
-    config.task3IntegralKiDegPerCmSecond = 0.400;
-    config.task3IntegralZoneCm = 3.00;
-    config.task3IntegralSpeedLimitCmS = 0.8;
+    // I 增益，单位 deg/(cm*s)；决定累计误差转成补偿角度的速度。
+    // 增大可更快消除静差，但过大会积分过冲、低频振荡；当前最大 I 输出为 0.400 deg。
+    config.task3IntegralKiDegPerCmSecond = 0.100;
+
+    // 积分位置窗口，单位 cm；仅当 |位置误差| <= 3 cm 时允许积分。
+    // 增大可更早启用 I，但也更容易在高速接近阶段积累过多误差。
+    config.task3IntegralZoneCm = 2.00;
+
+    // 积分速度门限，单位 cm/s；仅当两帧差速度绝对值不超过此值时才累计积分。
+    // 增大后 I 更容易介入，减小则必须更接近静止才介入。
+    config.task3IntegralSpeedLimitCmS = 2;
+
+    // 积分状态限幅，单位 cm*s；与 Ki 相乘得到 I 项最大角度：0.400 * 1.00 = 0.400 deg。
+    // 增大可对抗更大的长期偏差，但会增加积分释放时的过冲；每次目标反向都会清零。
     config.task3IntegralLimitCmSeconds = 1.00;
 
-    // Breakaway overlaps the final I window, avoiding the old 0.5-1.0 cm gap
-    // where neither compensation was active. It decays as soon as motion is
-    // measured, so this is still feedback driven rather than a minimum angle.
+    // 脱困触发的最小剩余误差，单位 cm；只有 |误差| >= 此值才认为仍需克服虚位/静摩擦。
+    // 减小会更靠近目标仍持续加力，过小可能破坏最终稳定；增大可能留下较大静差。
     config.task3BreakawayErrorCm = 0.35;
+
+    // 脱困触发的最大球速，单位 cm/s；只有球速绝对值不超过此值才判定“基本没动”。
+    // 增大后更容易触发脱困，过大会在球仍运动时继续加力；减小则触发更谨慎。
     config.task3BreakawaySpeedCmS = 0.35;
+
+    // 脱困触发延时，单位 s；误差较大且球近乎不动持续 0.08 s 后才开始增加补偿。
+    // 增大可过滤短时误判但破除虚位更慢，减小则响应更快但更容易误触发。
     config.task3BreakawayDelaySeconds = 0.08;
-    config.task3BreakawayRampDegPerSecond = 0.80;
+
+    // 脱困角度爬升速度，单位 deg/s；决定触发后附加角度建立得多快。
+    // 增大可更快顶过虚位和静摩擦，过大会突然冲球；条件消失时按该速度的 3 倍退回零。
+    config.task3BreakawayRampDegPerSecond = 0.20;
+
+    // 向右运动时允许叠加的最大脱困角度，单位 deg；只在反馈确认卡滞后加入基础 PDI。
+    // 增大可提高向右破静摩擦能力，但会增加启动突跳和越过目标的风险。
     config.task3MoveRightBreakawayMaximumAngleDeg = 0.11;
+
+    // 向左运动时允许叠加的最大脱困角度，单位 deg；用于补偿左向机构虚位/静摩擦。
+    // 增大可提高向左脱困能力，但过大会使左移启动过猛。
     config.task3MoveLeftBreakawayMaximumAngleDeg = 0.28;
 
-    // Asymmetric PDI saturation. Rightward motion can reach -0.80 deg normally
-    // and -0.91 deg only when feedback confirms a stall. Leftward motion is
-    // limited to +0.60/+0.88 deg; the extra range is feedback-triggered only.
+    // 向右基础 PDI 输出限幅，单位 deg；P+D+I 正常最多输出 -0.80 deg。
+    // 增大可提高右移加速度，但更易过冲；脱困激活后可再叠加 0.11 deg，最终到 -0.91 deg。
     config.task3MoveRightOutputAngleLimitDeg = 0.80;
+
+    // 向左基础 PDI 输出限幅，单位 deg；P+D+I 正常最多输出 +0.60 deg。
+    // 增大可提高左移加速度，但更易振荡；脱困激活后可再叠加 0.28 deg，最终到 +0.88 deg。
     config.task3MoveLeftOutputAngleLimitDeg = 0.60;
 
-    // v[n] = (x[n] - x[n-2]) / (t[n] - t[n-2]); low-pass only removes vision
-    // jitter after that two-frame difference.
+    // 速度差分帧数；当前 2 表示 v[n]=(x[n]-x[n-2])/(t[n]-t[n-2])。
+    // 帧数增大可降低单帧噪声但增加速度反馈延迟；当前控制器校验要求必须为 2。
     config.speedDifferenceFrames = 2;
+
+    // 速度低通滤波时间常数，单位 s；增大后显示/时序使用的速度更平滑但延迟更大。
+    // 注意：PDI 的 D、积分速度门和脱困速度门直接使用上面的原始两帧差速度，不经过此低通。
     config.speedFilterSeconds = 0.020;
 
+    // 水管最终机械安全角度限幅，单位 deg；基础 PDI 与脱困叠加后仍不得超过 +/-0.91 deg。
+    // 增大前必须确认机构行程和连杆安全，减小会直接限制整个控制器的最大控制能力。
     config.maximumPipeAngleDeg = 0.91;
+
+    // 水管目标角度变化率上限，单位 deg/s；限制每秒角度指令能变化多少，避免瞬间跳变。
+    // 增大后跟随更快但冲击更大，减小后更平滑但响应变慢；它不是电机的 200 RPM/s 加速度。
     config.angleSlewDegS = 8.0;
 
     // ---------------- 5. 曲柄连杆尺寸 ----------------
