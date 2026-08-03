@@ -155,6 +155,19 @@ void testPdiMotionController()
     assert(residualCommand.integralAngleDeg > 0.39);
     assert(residualCommand.integralAngleDeg <= 0.40 + 1e-9);
 
+    // Crossing the target must clear stale I even when the ball is moving too
+    // fast to integrate. Otherwise the old I pushes the ball farther away.
+    Task3MotionController crossingController(config);
+    Task3MotionCommand beforeCrossing;
+    for (int index = 0; index < 10; ++index) {
+        beforeCrossing = crossingController.update(
+            Task3Phase::MoveToNegative, -0.50, 0.0, 0.10);
+    }
+    assert(beforeCrossing.integralAngleDeg < -0.09);
+    const Task3MotionCommand afterCrossing = crossingController.update(
+        Task3Phase::MoveToNegative, 0.20, 5.0, 0.01);
+    assert(std::abs(afterCrossing.integralAngleDeg) < 1e-12);
+
     // A large error with no measured ball response gradually expands the
     // output beyond the normal PD limit.  It is feedback-triggered and decays
     // immediately after the ball starts moving.

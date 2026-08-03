@@ -150,6 +150,13 @@ public:
             std::abs(twoFrameSpeedCmS) <=
                 config_.task3IntegralSpeedLimitCmS;
 
+        // Never carry final-approach integral through the target. The old
+        // integral would otherwise keep pushing in the previous direction
+        // while the ball was already beyond the target and still moving away.
+        if (integralErrorCmSeconds_ * errorCm < 0.0) {
+            resetIntegral();
+        }
+
         // I is deliberately limited to the final approach around either target.
         // A target change clears it, so it cannot carry bias across the reversal.
         if (!insideIntegralPositionWindow) {

@@ -159,8 +159,9 @@ ball_stepper::AppConfig makeUserConfig()
     config.task3MoveRightPositionKpDegPerCm = 0.060;
     config.task3MoveLeftPositionKpDegPerCm = 0.060;
 
-    // D仍使用x[n]与x[n-2]的速度。本次按要求减小50%，进一步降低速度反馈冲击。
-    config.task3VelocityKdDegPerCmS = 0.015;
+    // D仍使用x[n]与x[n-2]的速度。日志显示0.015在高速过靶时制动力不足；
+    // P保持柔和的0.060，D恢复0.030只增强速度阻尼，不增加静止起步推力。
+    config.task3VelocityKdDegPerCmS = 0.030;
 
     // I只在最后2.5 cm且球速较低时介入。最大I输出为0.250*0.80=0.20 deg，
     // 足够消除直管静差，同时比旧版0.40 deg柔和，目标反向时仍会清零。
