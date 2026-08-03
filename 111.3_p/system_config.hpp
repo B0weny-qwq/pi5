@@ -96,7 +96,7 @@ struct AppConfig {
     double task3IntegralKiDegPerCmSecond = 0.300;
     double task3IntegralZoneCm = 3.00;
     double task3IntegralSpeedLimitCmS = 0.8;
-    double task3IntegralLimitCmSeconds = 0.60;
+    double task3IntegralLimitCmSeconds = 1.10;
 
     // If a large position error remains while the measured ball speed stays
     // near zero, slowly add a bounded breakaway angle.  This compensates
